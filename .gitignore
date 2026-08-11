@@ -1,23 +1,46 @@
+cat > .gitignore <<'EOF'
 # Python
 __pycache__/
 *.py[cod]
-*$py.class
+*.pyo
 
 # Virtual environment
 venv/
 .venv/
+env/
 
 # Environment variables
 .env
+.env.*
+!.env.example
 
-# Testing
+# Testing / coverage
 .pytest_cache/
 .coverage
 htmlcov/
+coverage.xml
 
-# VS Code
+# Type checking
+.mypy_cache/
+.pyright/
+
+# IDE
 .vscode/
+.idea/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Temporary files
+*.tmp
+*.temp
+EOF
