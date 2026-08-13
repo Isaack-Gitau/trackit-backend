@@ -1,0 +1,286 @@
+"""
+TRACKIT User Service.
+
+Contains business logic related to user accounts.
+
+Responsibilities:
+- Find users
+- Create users
+- Update account information
+- Activate/deactivate accounts
+- Verify email accounts
+- Change passwords
+- Invalidate authentication sessions
+
+This module does NOT handle HTTP requests.
+"""
+
+from datetime import datetime, timezone
+
+from sqlalchemy.orm import Session
+
+from app.core.security import hash_password, verify_password
+from app.models.user import User
+from app.repositories.users import (
+    create_user,
+    get_user_by_email,
+    get_user_by_id,
+    get_user_by_login,
+    get_user_by_username,
+)
+
+
+# ============================================================================
+# User Lookup
+# ============================================================================
+
+
+def get_user(
+    db: Session,
+    user_id: int,
+) -> User | None:
+    """
+    Retrieve a user by primary key.
+    """
+
+    return get_user_by_id(
+        db,
+        user_id,
+    )
+
+
+def get_user_by_username_service(
+    db: Session,
+    username: str,
+) -> User | None:
+    """
+    Retrieve a user by username.
+    """
+
+    return get_user_by_username(
+        db,
+        username,
+    )
+
+
+def get_user_by_email_service(
+    db: Session,
+    email: str,
+) -> User | None:
+    """
+    Retrieve a user by email.
+    """
+
+    return get_user_by_email(
+        db,
+        email,
+    )
+
+
+def get_user_by_login_service(
+    db: Session,
+    login: str,
+) -> User | None:
+    """
+    Retrieve a user using either username or email.
+    """
+
+    return get_user_by_login(
+        db,
+        login,
+    )
+
+
+# ============================================================================
+# Account Creation
+# ============================================================================
+
+
+def create_user_account(
+    db: Session,
+    *,
+    username: str,
+    first_name: str,
+    last_name: str,
+    email: str,
+    password: str,
+) -> User:
+    """
+    Create a new TRACKIT user account.
+
+    Passwords are hashed before persistence.
+    """
+
+    username = username.strip().lower()
+    email = email.strip().lower()
+
+    if get_user_by_username(db, username) is not None:
+        raise ValueError(
+            "Username is already registered."
+        )
+
+    if get_user_by_email(db, email) is not None:
+        raise ValueError(
+            "Email is already registered."
+        )
+
+    password_hash = hash_password(password)
+
+    return create_user(
+        db,
+        username=username,
+        first_name=first_name.strip(),
+        last_name=last_name.strip(),
+        email=email,
+        password_hash=password_hash,
+    )
+
+
+# ============================================================================
+# Account Verification
+# ============================================================================
+
+
+def verify_user_email(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Mark a user's email address as verified.
+    """
+
+    if user.is_verified:
+        return user
+
+    user.is_verified = True
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
+# ============================================================================
+# Account Status
+# ============================================================================
+
+
+def activate_user(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Activate a user account.
+    """
+
+    user.is_active = True
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
+def deactivate_user(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Deactivate a user account.
+
+    Incrementing token_version invalidates existing JWT sessions.
+    """
+
+    user.is_active = False
+    user.token_version += 1
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
+# ============================================================================
+# Password Management
+# ============================================================================
+
+
+def verify_user_password(
+    user: User,
+    password: str,
+) -> bool:
+    """
+    Verify a plaintext password against the stored Argon2 hash.
+    """
+
+    return verify_password(
+        password,
+        user.password_hash,
+    )
+
+
+def change_user_password(
+    db: Session,
+    user: User,
+    new_password: str,
+) -> User:
+    """
+    Change a user's password.
+
+    Security:
+    - Password is hashed with the central security service.
+    - Existing JWT sessions are invalidated.
+    - password_changed_at is updated.
+    """
+
+    user.password_hash = hash_password(new_password)
+
+    user.password_changed_at = datetime.now(
+        timezone.utc
+    )
+
+    user.token_version += 1
+
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return user
+
+
+# ============================================================================
+# Session Invalidation
+# ============================================================================
+
+
+def invalidate_user_sessions(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Invalidate all existing JWT sessions for a user.
+
+    Incrementing token_version causes previously issued
+    JWTs to become invalid.
+    """
+
+    user.token_version += 1
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.commit()
+    db.refresh(user)
+
+    return user

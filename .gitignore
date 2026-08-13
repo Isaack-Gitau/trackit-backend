@@ -1,4 +1,3 @@
-cat > .gitignore <<'EOF'
 # Python
 __pycache__/
 *.py[cod]
@@ -43,4 +42,3 @@ dist/
 # Temporary files
 *.tmp
 *.temp
-EOF

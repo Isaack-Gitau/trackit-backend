@@ -1,30 +1,50 @@
+"""
+TRACKIT User Database Model.
+
+Defines the User entity used by the authentication,
+authorization, and lost-and-found modules.
+
+Security principles:
+- Passwords are stored only as Argon2 hashes.
+- Authentication tokens are never stored on the User model.
+- Short-lived verification/reset tokens are stored in auth_tokens.
+- token_version supports JWT invalidation.
+"""
+
 from datetime import datetime
 
-from sqlalchemy import Boolean
-from sqlalchemy import DateTime
-from sqlalchemy import String
-from sqlalchemy import func
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
+from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 
 
 class User(Base):
     """
-    TRACKIT user account.
+    TRACKIT application user.
 
-    Users can report lost/found items, submit claims, comment on
-    items and interact with the TRACKIT platform according to
-    their assigned role.
+    A user may:
+    - own lost/found item posts
+    - authenticate using username or email
+    - verify their email address
+    - reset their password
+    - have a role controlling authorization
     """
 
     __tablename__ = "users"
+
+    # ========================================================================
+    # Primary Key
+    # ========================================================================
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
         index=True,
     )
+
+    # ========================================================================
+    # Identity
+    # ========================================================================
 
     username: Mapped[str] = mapped_column(
         String(50),
@@ -50,42 +70,95 @@ class User(Base):
         nullable=False,
     )
 
+    # ========================================================================
+    # Authentication
+    # ========================================================================
+
     password_hash: Mapped[str] = mapped_column(
         String(255),
         nullable=False,
     )
 
+    # ========================================================================
+    # Authorization
+    # ========================================================================
+
     role: Mapped[str] = mapped_column(
         String(30),
-        nullable=False,
         default="user",
         server_default="user",
+        nullable=False,
     )
+
+    # ========================================================================
+    # Account Status
+    # ========================================================================
 
     is_active: Mapped[bool] = mapped_column(
         Boolean,
-        nullable=False,
         default=True,
         server_default="true",
+        nullable=False,
     )
 
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
-        nullable=False,
         default=False,
         server_default="false",
+        nullable=False,
     )
+
+    # ========================================================================
+    # Security Auditing
+    # ========================================================================
+
+    password_changed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    """
+    JWT security version.
+
+    Incrementing this value invalidates previously issued
+    JWT access tokens when token validation checks the version.
+    """
+
+    token_version: Mapped[int] = mapped_column(
+        default=0,
+        server_default="0",
+        nullable=False,
+    )
+
+    # ========================================================================
+    # Timestamps
+    # ========================================================================
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
         server_default=func.now(),
+        nullable=False,
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
-        nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+        nullable=False,
     )
-    
+
+    # ========================================================================
+    # Relationships
+    # ========================================================================
+
+    items = relationship(
+        "Item",
+        back_populates="owner",
+        cascade="all, delete-orphan",
+    )
+
+    auth_tokens = relationship(
+        "AuthToken",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
