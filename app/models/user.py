@@ -17,6 +17,7 @@ from sqlalchemy import Boolean, DateTime, String, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
+from app.models.audit_log import AuditLog
 
 
 class User(Base):
@@ -162,3 +163,9 @@ class User(Base):
         back_populates="user",
         cascade="all, delete-orphan",
     )
+
+    audit_logs: Mapped[list["AuditLog"]] = relationship(
+        "AuditLog",
+        back_populates="user",
+    )
+    

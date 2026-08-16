@@ -1,3 +1,15 @@
+
+"""
+TRACKIT System API Router.
+
+Contains system-level API endpoints that are independent
+of specific application resources.
+
+Current endpoints:
+
+    GET /api/health
+"""
+
 from datetime import datetime, timezone
 
 from fastapi import APIRouter
@@ -5,10 +17,19 @@ from fastapi import APIRouter
 from app.core.config import settings
 
 
+# ============================================================================
+# ROUTER
+# ============================================================================
+
 router = APIRouter(
     prefix="/api",
     tags=["System"],
 )
+
+
+# ============================================================================
+# HEALTH CHECK
+# ============================================================================
 
 
 @router.get(
@@ -29,3 +50,4 @@ def health_check() -> dict:
         "service": settings.APP_NAME,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
