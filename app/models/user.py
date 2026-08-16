@@ -168,4 +168,18 @@ class User(Base):
         "AuditLog",
         back_populates="user",
     )
-    
+
+    claims = relationship(
+        "Claim",
+        foreign_keys="Claim.claimant_id",
+        back_populates="claimant",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    reviewed_claims = relationship(
+        "Claim",
+        foreign_keys="Claim.reviewed_by",
+        back_populates="reviewer",
+        passive_deletes=True,
+    )

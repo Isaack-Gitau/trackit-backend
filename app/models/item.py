@@ -74,3 +74,10 @@ class Item(Base):
         "User",
         back_populates="items",
     )
+
+    claims = relationship(
+        "Claim",
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
