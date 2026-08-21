@@ -18,6 +18,7 @@ class ClaimStatus:
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    WITHDRAWN = "withdrawn"
 
 
 class ReportStatus:

@@ -1,4 +1,3 @@
-
 """
 TRACKIT Audit Log Model.
 
@@ -26,7 +25,7 @@ from sqlalchemy import (
     Text,
     func,
 )
-from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm import Mapped, mapped_column, relationship, synonym
 
 from app.db.base import Base
 
@@ -37,9 +36,6 @@ if TYPE_CHECKING:
 class AuditLog(Base):
     """
     TRACKIT security and application audit event.
-
-    Audit records provide an accountability trail for important
-    security and application events.
     """
 
     __tablename__ = "audit_logs"
@@ -58,11 +54,16 @@ class AuditLog(Base):
     # Event Information
     # ========================================================================
 
-    event_type: Mapped[str] = mapped_column(
+    action: Mapped[str] = mapped_column(
         String(100),
         nullable=False,
         index=True,
     )
+
+    # Keep existing application code working:
+    #
+    # event_type -> database column "action"
+    event_type = synonym("action")
 
     success: Mapped[bool] = mapped_column(
         Boolean,
@@ -71,9 +72,26 @@ class AuditLog(Base):
         server_default="true",
     )
 
-    description: Mapped[str | None] = mapped_column(
+    details: Mapped[str | None] = mapped_column(
         Text,
         nullable=True,
+    )
+
+    # Keep existing application code working:
+    #
+    # description -> database column "details"
+    description = synonym("details")
+
+    resource_type: Mapped[str | None] = mapped_column(
+        String(100),
+        nullable=True,
+        index=True,
+    )
+
+    resource_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+        index=True,
     )
 
     # ========================================================================
