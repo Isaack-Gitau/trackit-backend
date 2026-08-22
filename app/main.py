@@ -29,7 +29,8 @@ from app.middleware.security import configure_security_middleware
 from app.routers.api import router as api_router
 from app.routers.auth import router as auth_router
 from app.routers.items import router as items_router
-
+from app.routers.claims import router as claims_router
+from app.routers.reports import router as reports_router
 
 # ============================================================================
 # APPLICATION
@@ -68,6 +69,24 @@ app.include_router(
     prefix="/api",
 )
 
+# ============================================================================
+# CLAIM API
+# ============================================================================
+
+app.include_router(
+    claims_router,
+    prefix="/api",
+)
+
+
+# ============================================================================
+# REPORT API
+# ============================================================================
+
+app.include_router(
+    reports_router,
+    prefix="/api",
+)
 
 # ============================================================================
 # AUTHENTICATION API

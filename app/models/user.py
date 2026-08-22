@@ -183,3 +183,18 @@ class User(Base):
         back_populates="reviewer",
         passive_deletes=True,
     )
+
+    reports = relationship(
+        "Report",
+        foreign_keys="Report.reporter_id",
+        back_populates="reporter",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    reviewed_reports = relationship(
+        "Report",
+        foreign_keys="Report.reviewed_by",
+        back_populates="reviewer",
+        passive_deletes=True,
+    )

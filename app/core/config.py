@@ -157,6 +157,24 @@ class Settings(BaseSettings):
     # Pydantic Settings Configuration
     # ========================================================================
 
+        # ========================================================================
+    # Email / SMTP
+    # ========================================================================
+
+    SMTP_HOST: str = "smtp.gmail.com"
+    SMTP_PORT: int = 587
+
+    SMTP_USERNAME: str
+    SMTP_PASSWORD: str
+
+    SMTP_FROM_EMAIL: str
+    SMTP_FROM_NAME: str = "TRACKIT"
+
+    SMTP_USE_TLS: bool = True
+
+    # Frontend URL used in verification/password-reset links.
+    FRONTEND_URL: str = "http://localhost:5500"
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

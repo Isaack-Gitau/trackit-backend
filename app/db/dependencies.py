@@ -9,12 +9,22 @@ def get_db() -> Generator[Session, None, None]:
     """
     Provide a database session for a request.
 
-    The session is always closed after the request finishes.
+    Transaction behavior:
+
+    - Successful request -> commit
+    - Failed request -> rollback
+    - Always -> close session
     """
 
     db = SessionLocal()
 
     try:
         yield db
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
     finally:
         db.close()

@@ -95,5 +95,6 @@ def create_audit_log(
     )
 
     db.add(audit_log)
+    db.flush()
 
     return audit_log

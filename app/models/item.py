@@ -81,3 +81,10 @@ class Item(Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
     )
+
+    reports = relationship(
+        "Report",
+        back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )

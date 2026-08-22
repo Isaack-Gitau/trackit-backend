@@ -11,7 +11,7 @@ Tests:
 - Request metadata
 - Safe handling of optional fields
 """
-
+from app.models.user import User
 from app.models.audit_log import AuditLog
 from app.services.audit_log import (
     AUDIT_LOGIN_FAILURE,
@@ -97,18 +97,32 @@ def test_anonymous_audit_event():
 # SERVICE OBJECT CREATION
 # ============================================================================
 
-
 def test_create_audit_log_service_adds_record(db):
     """
     create_audit_log should add an AuditLog instance to the session.
     """
+
+    user = User(
+        id=1,
+        username="audit_test_user",
+        first_name="Audit",
+        last_name="Tester",
+        email="audit_test_user@trackit.test",
+        password_hash="test-password-hash",
+        role="user",
+        is_active=True,
+        is_verified=True,
+    )
+
+    db.add(user)
+    db.flush()
 
     audit_log = create_audit_log(
         db,
         event_type=AUDIT_LOGIN_SUCCESS,
         success=True,
         description="User login successful.",
-        user_id=1,
+        user_id=user.id,
         ip_address="127.0.0.1",
         user_agent="TRACKIT-TestClient",
     )
@@ -117,6 +131,6 @@ def test_create_audit_log_service_adds_record(db):
     assert audit_log.event_type == AUDIT_LOGIN_SUCCESS
     assert audit_log.success is True
     assert audit_log.description == "User login successful."
-    assert audit_log.user_id == 1
+    assert audit_log.user_id == user.id
     assert audit_log.ip_address == "127.0.0.1"
     assert audit_log.user_agent == "TRACKIT-TestClient"

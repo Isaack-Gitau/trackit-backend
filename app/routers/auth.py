@@ -6,9 +6,9 @@ Authentication endpoints for:
 
 - User registration
 - User login
-- Current-user information
+- Current authenticated user
 - Email verification
-- Resending verification tokens
+- Resending verification emails
 - Forgot-password requests
 - Password reset
 
@@ -23,7 +23,12 @@ Security principles:
 - JWT authentication is handled through API dependencies.
 - Authentication endpoints are rate limited by client IP.
 - Rate-limit responses include Retry-After information.
+- Authentication tokens are delivered through transactional email.
 """
+
+from __future__ import annotations
+
+import logging
 
 from fastapi import (
     APIRouter,
@@ -32,7 +37,6 @@ from fastapi import (
     Request,
     status,
 )
-
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -58,6 +62,11 @@ from app.services.auth import (
     register_user,
 )
 
+from app.services.email import (
+    send_password_reset_email,
+    send_verification_email,
+)
+
 from app.services.email_verification import (
     create_verification_token,
     verify_email,
@@ -71,6 +80,13 @@ from app.services.password_reset import (
 from app.services.user import (
     get_user_by_email_service,
 )
+
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -94,16 +110,11 @@ def _get_client_ip(
     """
     Return the client IP address used for rate limiting.
 
-    For the current development/single-instance deployment,
-    FastAPI's request.client address is used.
+    X-Forwarded-For is intentionally not trusted in the current
+    development/single-instance deployment.
 
-    IMPORTANT SECURITY NOTE:
-
-    X-Forwarded-For and similar proxy headers are intentionally
-    NOT trusted here.
-
-    When TRACKIT is deployed behind a reverse proxy, trusted
-    proxy configuration should be introduced explicitly.
+    When TRACKIT is deployed behind a reverse proxy, trusted proxy
+    configuration should be introduced explicitly.
     """
 
     if request.client is None:
@@ -127,47 +138,30 @@ def _enforce_rate_limit(
     """
     Enforce an IP-based rate limit.
 
-    Each authentication operation receives its own bucket.
-
-    Examples:
-
-        register:127.0.0.1
-        login:127.0.0.1
-        verify-email:127.0.0.1
-        resend-verification:127.0.0.1
-        forgot-password:127.0.0.1
-        reset-password:127.0.0.1
-
     Raises:
         HTTPException:
-            HTTP 429 when the configured limit is exceeded.
+            HTTP 429 when the rate limit is exceeded.
     """
 
     client_ip = _get_client_ip(request)
 
-    key = f"{bucket}:{client_ip}"
-
     result = check_rate_limit(
-        key=key,
+        key=f"{bucket}:{client_ip}",
         max_attempts=max_attempts,
         window_seconds=window_seconds,
     )
 
-    if result.allowed:
-        return
-
-    raise HTTPException(
-        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-        detail=(
-            "Too many requests. "
-            "Please try again later."
-        ),
-        headers={
-            "Retry-After": str(
-                result.retry_after
+    if not result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Too many requests. "
+                "Please try again later."
             ),
-        },
-    )
+            headers={
+                "Retry-After": str(result.retry_after),
+            },
+        )
 
 
 # ============================================================================
@@ -181,7 +175,7 @@ def _enforce_rate_limit(
     status_code=status.HTTP_201_CREATED,
     summary="Register a new user",
 )
-def register(
+async def register(
     data: UserRegisterRequest,
     request: Request,
     db: Session = Depends(get_db),
@@ -194,7 +188,7 @@ def register(
     - are active
     - are unverified
     - cannot log in until email verification
-    - receive a short-lived verification token
+    - receive a verification email
 
     Registration is rate limited by client IP.
     """
@@ -207,9 +201,7 @@ def register(
         request=request,
         bucket="register",
         max_attempts=settings.REGISTER_RATE_LIMIT_ATTEMPTS,
-        window_seconds=(
-            settings.REGISTER_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        window_seconds=settings.REGISTER_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -237,19 +229,45 @@ def register(
 
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "Username or email is already registered."
-            ),
+            detail="Username or email is already registered.",
         ) from None
 
     # ------------------------------------------------------------------
-    # Create email verification token
+    # Create verification token
     # ------------------------------------------------------------------
 
-    create_verification_token(
+    verification_token = create_verification_token(
         db,
         user,
     )
+
+    # ------------------------------------------------------------------
+    # Send verification email
+    # ------------------------------------------------------------------
+
+    try:
+        await send_verification_email(
+            recipient=user.email,
+            token=verification_token,
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to send verification email for user %s.",
+            user.id,
+        )
+
+        # The account and token already exist. Do not expose SMTP
+        # implementation details to the client.
+        #
+        # The user can use the resend-verification endpoint.
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                "Account created, but the verification email "
+                "could not be sent. Please try again later."
+            ),
+        ) from None
 
     # ------------------------------------------------------------------
     # Response
@@ -285,8 +303,6 @@ def login(
     - active account
     - verified email
 
-    Login attempts are rate limited by client IP.
-
     Authentication failures intentionally use a generic
     response so the endpoint does not reveal sensitive
     account information.
@@ -300,9 +316,7 @@ def login(
         request=request,
         bucket="login",
         max_attempts=settings.LOGIN_RATE_LIMIT_ATTEMPTS,
-        window_seconds=(
-            settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        window_seconds=settings.LOGIN_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -396,12 +410,8 @@ def verify_email_endpoint(
     _enforce_rate_limit(
         request=request,
         bucket="verify-email",
-        max_attempts=(
-            settings.VERIFICATION_RATE_LIMIT_ATTEMPTS
-        ),
-        window_seconds=(
-            settings.VERIFICATION_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        max_attempts=settings.VERIFICATION_RATE_LIMIT_ATTEMPTS,
+        window_seconds=settings.VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -416,9 +426,7 @@ def verify_email_endpoint(
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Invalid or expired verification token."
-            ),
+            detail="Invalid or expired verification token.",
         )
 
     # ------------------------------------------------------------------
@@ -437,18 +445,18 @@ def verify_email_endpoint(
 
 @router.post(
     "/resend-verification",
-    summary="Resend an email verification token",
+    summary="Resend an email verification message",
 )
-def resend_verification(
+async def resend_verification(
     data: ResendVerificationRequest,
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict[str, str]:
     """
-    Request a new email verification token.
+    Request a new email verification message.
 
-    The response is intentionally identical whether
-    or not the account exists.
+    The response is intentionally identical whether or not
+    the account exists.
 
     This prevents account enumeration.
 
@@ -462,12 +470,8 @@ def resend_verification(
     _enforce_rate_limit(
         request=request,
         bucket="resend-verification",
-        max_attempts=(
-            settings.VERIFICATION_RATE_LIMIT_ATTEMPTS
-        ),
-        window_seconds=(
-            settings.VERIFICATION_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        max_attempts=settings.VERIFICATION_RATE_LIMIT_ATTEMPTS,
+        window_seconds=settings.VERIFICATION_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -508,13 +512,37 @@ def resend_verification(
         }
 
     # ------------------------------------------------------------------
-    # Create replacement verification token
+    # Create replacement token
     # ------------------------------------------------------------------
 
-    create_verification_token(
+    verification_token = create_verification_token(
         db,
         user,
     )
+
+    # ------------------------------------------------------------------
+    # Send verification email
+    # ------------------------------------------------------------------
+
+    try:
+        await send_verification_email(
+            recipient=user.email,
+            token=verification_token,
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to send verification email for user %s.",
+            user.id,
+        )
+
+        # Keep the response generic.
+        #
+        # This prevents account enumeration and avoids exposing
+        # SMTP implementation details.
+        return {
+            "message": generic_message,
+        }
 
     return {
         "message": generic_message,
@@ -530,7 +558,7 @@ def resend_verification(
     "/forgot-password",
     summary="Request a password reset",
 )
-def forgot_password(
+async def forgot_password(
     data: ForgotPasswordRequest,
     request: Request,
     db: Session = Depends(get_db),
@@ -538,8 +566,8 @@ def forgot_password(
     """
     Start the TRACKIT password-reset process.
 
-    The response never reveals whether an account
-    exists for the supplied email.
+    The response never reveals whether an account exists
+    for the supplied email.
 
     Requests are rate limited by client IP.
     """
@@ -551,12 +579,8 @@ def forgot_password(
     _enforce_rate_limit(
         request=request,
         bucket="forgot-password",
-        max_attempts=(
-            settings.PASSWORD_RESET_RATE_LIMIT_ATTEMPTS
-        ),
-        window_seconds=(
-            settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        max_attempts=settings.PASSWORD_RESET_RATE_LIMIT_ATTEMPTS,
+        window_seconds=settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -595,10 +619,34 @@ def forgot_password(
     # Create password-reset token
     # ------------------------------------------------------------------
 
-    create_password_reset_token(
+    reset_token = create_password_reset_token(
         db,
         user,
     )
+
+    # ------------------------------------------------------------------
+    # Send password-reset email
+    # ------------------------------------------------------------------
+
+    try:
+        await send_password_reset_email(
+            recipient=user.email,
+            token=reset_token,
+        )
+
+    except Exception:
+        logger.exception(
+            "Failed to send password-reset email for user %s.",
+            user.id,
+        )
+
+        # Keep the response generic.
+        #
+        # Do not expose whether the account exists or why
+        # the SMTP operation failed.
+        return {
+            "message": generic_message,
+        }
 
     return {
         "message": generic_message,
@@ -606,31 +654,32 @@ def forgot_password(
 
 
 # ============================================================================
-# PASSWORD RESET
+# RESET PASSWORD
 # ============================================================================
 
 
 @router.post(
     "/reset-password",
-    summary="Reset a user password",
+    response_model=AuthenticatedUserResponse,
+    summary="Reset a user's password",
 )
 def reset_password(
     data: ResetPasswordRequest,
     request: Request,
     db: Session = Depends(get_db),
-) -> dict[str, str]:
+) -> AuthenticatedUserResponse:
     """
-    Reset a user's password using a valid,
-    single-use password-reset token.
+    Reset a user's password using a valid password-reset token.
 
-    Successful reset:
+    The token must be:
 
-    - changes the password
-    - updates password_changed_at
-    - increments token_version
-    - invalidates existing JWT sessions
-    - consumes the reset token
-    - invalidates other unused reset tokens
+    - valid
+    - unexpired
+    - unused
+    - the correct token type
+
+    Successful password reset also invalidates existing
+    JWT sessions through the password-reset service.
 
     Reset attempts are rate limited by client IP.
     """
@@ -642,12 +691,8 @@ def reset_password(
     _enforce_rate_limit(
         request=request,
         bucket="reset-password",
-        max_attempts=(
-            settings.PASSWORD_RESET_RATE_LIMIT_ATTEMPTS
-        ),
-        window_seconds=(
-            settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS
-        ),
+        max_attempts=settings.PASSWORD_RESET_RATE_LIMIT_ATTEMPTS,
+        window_seconds=settings.PASSWORD_RESET_RATE_LIMIT_WINDOW_SECONDS,
     )
 
     # ------------------------------------------------------------------
@@ -663,29 +708,24 @@ def reset_password(
 
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 
     # ------------------------------------------------------------------
-    # Invalid or expired token
+    # Invalid / expired token
     # ------------------------------------------------------------------
 
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "Invalid or expired password reset token."
-            ),
+            detail="Invalid or expired password reset token.",
         )
 
     # ------------------------------------------------------------------
-    # Success
+    # Response
     # ------------------------------------------------------------------
 
-    return {
-        "message": (
-            "Password reset successfully. "
-            "You may now log in with your new password."
-        ),
-    }
+    return AuthenticatedUserResponse.model_validate(
+        user
+    )
