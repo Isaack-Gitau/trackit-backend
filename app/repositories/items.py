@@ -211,6 +211,30 @@ def update_item(
 
 
 # ============================================================================
+# UPDATE — STATUS
+# ============================================================================
+
+
+def update_item_status(
+    db: Session,
+    item: Item,
+    *,
+    status: str,
+) -> Item:
+    """
+    Update the status of an item.
+
+    Authorization and business rules must be handled
+    by the service layer.
+    """
+
+    item.status = status
+    db.flush()
+
+    return item
+
+
+# ============================================================================
 # DELETE
 # ============================================================================
 

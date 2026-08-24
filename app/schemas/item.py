@@ -142,6 +142,41 @@ class ItemUpdate(BaseModel):
         return value
 
 
+
+# ============================================================================
+# ITEM MODERATION
+# ============================================================================
+
+
+class ItemReject(BaseModel):
+    """
+    Data required when an administrator rejects an item.
+
+    A rejection reason is mandatory for accountability.
+    """
+
+    reason: str = Field(
+        ...,
+        min_length=3,
+        max_length=1000,
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def strip_reason(cls, value: str) -> str:
+        """
+        Normalize and validate the rejection reason.
+        """
+
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "Rejection reason cannot be empty."
+            )
+
+        return value
+
 # ============================================================================
 # ITEM RESPONSE
 # ============================================================================
@@ -204,6 +239,7 @@ class ItemListParams(BaseModel):
         "pending",
         "approved",
         "rejected",
+        "claimed",
     ] | None = None
 
     page: int = Field(

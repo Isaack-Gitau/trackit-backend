@@ -89,6 +89,31 @@ def db():
         engine.dispose()
 
 
+@pytest.fixture
+def admin_user(db: Session):
+    """
+    Provide a test administrator for moderation tests.
+    """
+
+    from app.models.user import User
+
+    user = User(
+        id=99,
+        username="testadmin99",
+        first_name="Test",
+        last_name="Admin",
+        email="testadmin99@trackit.test",
+        password_hash="test-password-hash",
+        role="admin",
+        is_active=True,
+        is_verified=True,
+    )
+
+    db.add(user)
+    db.flush()
+
+    return user
+
 # ============================================================================
 # FASTAPI DATABASE OVERRIDE
 # ============================================================================

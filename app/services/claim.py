@@ -45,6 +45,10 @@ from app.repositories.claims import (
     update_claim as repository_update_claim,
     withdraw_claim as repository_withdraw_claim,
 )
+
+from app.repositories.items import (
+    update_item_status as repository_update_item_status,
+)
 from app.services.audit_log import (
     AUDIT_CLAIM_CREATED,
     AUDIT_CLAIM_UPDATED,
@@ -99,6 +103,11 @@ def create_claim(
     if item.type != "found":
         raise ValueError(
             "Claims can only be submitted for found items."
+        )
+    
+    if item.status !="approved":
+        raise ValueError(
+            "claims can only be submitted for approved"
         )
 
     if item.user_id == claimant_id:
@@ -291,16 +300,33 @@ def approve_claim(
     """
     Approve a pending claim.
 
-    The caller is responsible for ensuring that reviewer_id
-    belongs to an authorized administrator.
+    Business rules:
 
-    Only pending claims can be approved.
+    - Only pending claims can be approved.
+    - An item may have only one approved claim.
+    - Once a claim is approved, the associated item becomes claimed.
+    - The caller is responsible for administrator authorization.
     """
 
     if claim.status != CLAIM_STATUS_PENDING:
         raise ValueError(
             "Only pending claims can be approved."
         )
+
+    # Prevent multiple approved claims for the same item.
+    item_claims = get_claims_by_item(
+        db,
+        item_id=claim.item_id,
+    )
+
+    for existing_claim in item_claims:
+        if (
+            existing_claim.id != claim.id
+            and existing_claim.status == CLAIM_STATUS_APPROVED
+        ):
+            raise ValueError(
+                "This item already has an approved claim."
+            )
 
     reviewed_at = datetime.now(timezone.utc)
 
@@ -312,12 +338,20 @@ def approve_claim(
         reviewed_at=reviewed_at,
     )
 
+    # An approved claim means the item has been successfully claimed.
+    repository_update_item_status(
+        db,
+        claim.item,
+        status="claimed",
+    )
+
     create_audit_log(
         db,
         event_type=AUDIT_CLAIM_UPDATED,
         success=True,
         description=(
-            f"Claim {claim.id} approved."
+            f"Claim {claim.id} approved and item "
+            f"{claim.item_id} marked as claimed."
         ),
         user_id=reviewer_id,
         ip_address=ip_address,

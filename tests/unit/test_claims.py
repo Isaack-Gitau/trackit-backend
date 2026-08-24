@@ -1,3 +1,4 @@
+
 """
 TRACKIT Claim Service Unit Tests.
 
@@ -23,6 +24,7 @@ Coverage:
 - rejection status restriction
 - reviewer tracking
 - claim lifecycle
+- rejected claim resubmission
 - audit logging through service execution
 
 Architecture under test:
@@ -38,7 +40,6 @@ from datetime import datetime
 
 import pytest
 
-from app.models.claim import Claim
 from app.models.item import Item
 from app.models.user import User
 
@@ -119,9 +120,6 @@ def create_test_reviewer(
 ):
     """
     Create a valid administrator/reviewer user.
-
-    This is intentionally separate from create_test_user()
-    to make reviewer requirements explicit in the tests.
     """
 
     return create_test_user(
@@ -140,6 +138,8 @@ def create_test_item(
 ):
     """
     Create a minimal valid item for claim tests.
+
+    Claims are only allowed against approved found items.
     """
 
     create_test_user(
@@ -370,6 +370,67 @@ def test_different_users_can_claim_same_found_item(db):
     assert claim_one.id != claim_two.id
     assert claim_one.claimant_id == 2
     assert claim_two.claimant_id == 3
+
+
+def test_rejected_claim_can_be_resubmitted(db):
+    """
+    A rejected claim is historical and should not prevent
+    the same user from submitting a new claim.
+    """
+
+    item, first_claim = create_test_claim(db)
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REVIEWER_ID,
+    )
+
+    rejected = reject_claim(
+        db,
+        claim=first_claim,
+        reviewer_id=reviewer.id,
+        rejection_reason="Insufficient proof of ownership.",
+    )
+
+    assert rejected.status == CLAIM_STATUS_REJECTED
+
+    second_claim = create_claim(
+        db,
+        item=item,
+        claimant_id=TEST_CLAIMANT_ID,
+        reason="I am providing additional identifying information.",
+    )
+
+    assert second_claim.id != first_claim.id
+    assert second_claim.status == CLAIM_STATUS_PENDING
+    assert first_claim.status == CLAIM_STATUS_REJECTED
+
+
+def test_withdrawn_claim_can_be_resubmitted(db):
+    """
+    A withdrawn claim is historical and should not prevent
+    the same user from submitting a new claim.
+    """
+
+    item, first_claim = create_test_claim(db)
+
+    withdrawn = withdraw_claim(
+        db,
+        claim=first_claim,
+        claimant_id=TEST_CLAIMANT_ID,
+    )
+
+    assert withdrawn.status == CLAIM_STATUS_WITHDRAWN
+
+    second_claim = create_claim(
+        db,
+        item=item,
+        claimant_id=TEST_CLAIMANT_ID,
+        reason="I want to submit the claim again.",
+    )
+
+    assert second_claim.id != first_claim.id
+    assert second_claim.status == CLAIM_STATUS_PENDING
 
 
 # ============================================================================
@@ -725,6 +786,133 @@ def test_admin_can_approve_pending_claim(db):
     )
 
 
+def test_approving_claim_marks_item_as_claimed(db):
+    """
+    Approving a claim must automatically mark the associated
+    found item as claimed.
+    """
+
+    item, claim = create_test_claim(db)
+
+    assert item.status == "approved"
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REVIEWER_ID,
+    )
+
+    result = approve_claim(
+        db,
+        claim=claim,
+        reviewer_id=reviewer.id,
+    )
+
+    assert result.status == CLAIM_STATUS_APPROVED
+    assert item.status == "claimed"
+
+
+def test_only_one_claim_can_be_approved_for_an_item(db):
+    """
+    Multiple users may have pending claims, but only one claim
+    may be approved for the same item.
+    """
+
+    item = create_test_item(db)
+
+    create_test_user(
+        db,
+        user_id=2,
+    )
+
+    create_test_user(
+        db,
+        user_id=3,
+    )
+
+    first_claim = create_claim(
+        db,
+        item=item,
+        claimant_id=2,
+        reason="I can identify this item.",
+    )
+
+    second_claim = create_claim(
+        db,
+        item=item,
+        claimant_id=3,
+        reason="I have identifying information.",
+    )
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REVIEWER_ID,
+    )
+
+    approve_claim(
+        db,
+        claim=first_claim,
+        reviewer_id=reviewer.id,
+    )
+
+    assert first_claim.status == CLAIM_STATUS_APPROVED
+    assert item.status == "claimed"
+
+    with pytest.raises(
+        ValueError,
+        match="already has an approved claim",
+    ):
+        approve_claim(
+            db,
+            claim=second_claim,
+            reviewer_id=reviewer.id,
+        )
+
+    assert second_claim.status == CLAIM_STATUS_PENDING
+    assert item.status == "claimed"
+
+
+def test_rejected_claim_does_not_change_item_status(db):
+    """
+    Rejecting a claim must leave the item available for
+    future claims.
+    """
+
+    item, claim = create_test_claim(db)
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REVIEWER_ID,
+    )
+
+    rejected = reject_claim(
+        db,
+        claim=claim,
+        reviewer_id=reviewer.id,
+        rejection_reason="Ownership could not be verified.",
+    )
+
+    assert rejected.status == CLAIM_STATUS_REJECTED
+    assert item.status == "approved"
+
+
+def test_withdrawn_claim_does_not_change_item_status(db):
+    """
+    Withdrawing a claim must leave the item available for
+    future claims.
+    """
+
+    item, claim = create_test_claim(db)
+
+    withdrawn = withdraw_claim(
+        db,
+        claim=claim,
+        claimant_id=TEST_CLAIMANT_ID,
+    )
+
+    assert withdrawn.status == CLAIM_STATUS_WITHDRAWN
+    assert item.status == "approved"
+
+
 def test_only_pending_claim_can_be_approved(db):
     """
     A claim that has already been rejected cannot be approved.
@@ -1030,7 +1218,8 @@ def test_claim_lifecycle_pending_to_withdrawn(db):
 
 def test_withdrawn_claim_does_not_remain_active(db):
     """
-    Once a claim is withdrawn, it should no longer have pending status.
+    Once a claim is withdrawn, it should no longer block
+    the claimant from submitting a new claim.
     """
 
     item, claim = create_test_claim(db)
@@ -1043,8 +1232,6 @@ def test_withdrawn_claim_does_not_remain_active(db):
 
     assert withdrawn.status == CLAIM_STATUS_WITHDRAWN
 
-    # A withdrawn claim should no longer block the claimant
-    # from submitting a new claim for the same item.
     new_claim = create_claim(
         db,
         item=item,
@@ -1128,3 +1315,152 @@ def test_rejection_records_reviewer(db):
     assert result.rejection_reason == (
         "Ownership evidence was insufficient."
     )
+
+
+# ============================================================================
+# REJECTED → RESUBMITTED → APPROVED
+# ============================================================================
+
+
+def test_rejected_claim_can_be_resubmitted_and_approved(db):
+    """
+    A rejected claim should remain in history while allowing
+    the claimant to submit a new claim for the same item.
+
+    Lifecycle:
+
+        PENDING
+          ↓
+        REJECTED
+          ↓
+        NEW CLAIM
+          ↓
+        PENDING
+          ↓
+        APPROVED
+          ↓
+        ITEM = CLAIMED
+    """
+
+    # ------------------------------------------------------------
+    # 1. Create the item and first claim.
+    # ------------------------------------------------------------
+
+    item, first_claim = create_test_claim(
+        db,
+        claimant_id=TEST_CLAIMANT_ID,
+        title="Resubmission Test Backpack",
+    )
+
+    assert first_claim.status == CLAIM_STATUS_PENDING
+    assert item.status == "approved"
+
+    # ------------------------------------------------------------
+    # 2. Reject the first claim.
+    # ------------------------------------------------------------
+
+    rejection_reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REJECTION_REVIEWER_ID,
+    )
+
+    rejected_claim = reject_claim(
+        db,
+        claim=first_claim,
+        reviewer_id=rejection_reviewer.id,
+        rejection_reason=(
+            "The claimant could not provide sufficient proof."
+        ),
+    )
+
+    assert rejected_claim.status == CLAIM_STATUS_REJECTED
+    assert rejected_claim.rejection_reason == (
+        "The claimant could not provide sufficient proof."
+    )
+
+    # The original claim remains in history.
+    assert rejected_claim.id == first_claim.id
+
+    # Rejecting a claim does not make the item unavailable.
+    assert item.status == "approved"
+
+    # ------------------------------------------------------------
+    # 3. Submit a NEW claim from the same user.
+    # ------------------------------------------------------------
+
+    second_claim = create_claim(
+        db,
+        item=item,
+        claimant_id=TEST_CLAIMANT_ID,
+        reason="I can now provide additional proof of ownership.",
+    )
+
+    # A new database record must be created.
+    assert second_claim.id != first_claim.id
+
+    # The new claim starts as pending.
+    assert second_claim.status == CLAIM_STATUS_PENDING
+
+    # The old rejected claim remains rejected.
+    assert first_claim.status == CLAIM_STATUS_REJECTED
+
+    # ------------------------------------------------------------
+    # 4. Approve the NEW claim.
+    # ------------------------------------------------------------
+
+    approval_reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_APPROVAL_REVIEWER_ID,
+    )
+
+    approved_claim = approve_claim(
+        db,
+        claim=second_claim,
+        reviewer_id=approval_reviewer.id,
+    )
+
+    assert approved_claim.status == CLAIM_STATUS_APPROVED
+    assert approved_claim.reviewed_by == approval_reviewer.id
+    assert approved_claim.reviewed_at is not None
+
+    # ------------------------------------------------------------
+    # 5. Approval must mark the item as claimed.
+    # ------------------------------------------------------------
+
+    assert item.status == "claimed"
+
+    # ------------------------------------------------------------
+    # 6. Both claim records must remain in history.
+    # ------------------------------------------------------------
+
+    claims = list_item_claims(
+        db,
+        item_id=item.id,
+    )
+
+    claim_ids = {
+        claim.id
+        for claim in claims
+    }
+
+    assert first_claim.id in claim_ids
+    assert second_claim.id in claim_ids
+
+    # ------------------------------------------------------------
+    # 7. Verify historical states were preserved.
+    # ------------------------------------------------------------
+
+    historical_claim = next(
+        claim
+        for claim in claims
+        if claim.id == first_claim.id
+    )
+
+    final_claim = next(
+        claim
+        for claim in claims
+        if claim.id == second_claim.id
+    )
+
+    assert historical_claim.status == CLAIM_STATUS_REJECTED
+    assert final_claim.status == CLAIM_STATUS_APPROVED

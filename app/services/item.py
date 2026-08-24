@@ -27,7 +27,24 @@ from app.repositories.items import (
     get_items,
     get_items_by_user,
     update_item as repository_update_item,
+    update_item_status as repository_update_item_status,
 )
+
+from app.services.audit_log import (
+    AUDIT_ADMIN_ACTION,
+    create_audit_log
+)
+
+# ============================================================================
+# ITEM STATUS
+# ============================================================================
+
+ITEM_STATUS_PENDING = "pending"
+ITEM_STATUS_APPROVED = "approved"
+ITEM_STATUS_REJECTED = "rejected"
+ITEM_STATUS_CLAIMED = "claimed"
+
+ITEM_MODERATABLE_STATUS = ITEM_STATUS_PENDING
 
 
 # ============================================================================
@@ -206,3 +223,105 @@ def delete_item(
         db,
         item,
     )
+
+# ============================================================================
+# MODERATION
+# ============================================================================
+
+
+def approve_item(
+    db: Session,
+    *,
+    item: Item,
+    reviewer_id: int,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> Item:
+    """
+    Approve a pending item.
+
+    Business rules:
+
+    - Only pending items may be approved.
+    - Reviewer identity comes from the authenticated administrator.
+    - Approval is audited.
+    """
+
+    if item.status != ITEM_STATUS_PENDING:
+        raise ValueError(
+            "Only pending items can be approved."
+        )
+
+    updated_item = repository_update_item_status(
+        db,
+        item,
+        status=ITEM_STATUS_APPROVED,
+    )
+
+    create_audit_log(
+        db,
+        event_type=AUDIT_ADMIN_ACTION,
+        success=True,
+        description=(
+            f"Item {item.id} approved by administrator."
+        ),
+        user_id=reviewer_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    return updated_item
+
+
+def reject_item(
+    db: Session,
+    *,
+    item: Item,
+    reviewer_id: int,
+    rejection_reason: str,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> Item:
+    """
+    Reject a pending item.
+
+    Business rules:
+
+    - Only pending items may be rejected.
+    - Rejection requires a reason.
+    - Reviewer identity comes from the authenticated administrator.
+    - Rejection is audited.
+    """
+
+    if item.status != ITEM_STATUS_PENDING:
+        raise ValueError(
+            "Only pending items can be rejected."
+        )
+
+    normalized_reason = rejection_reason.strip()
+
+    if not normalized_reason:
+        raise ValueError(
+            "Rejection reason cannot be empty."
+        )
+
+    updated_item = repository_update_item_status(
+        db,
+        item,
+        status=ITEM_STATUS_REJECTED,
+    )
+
+    create_audit_log(
+        db,
+        event_type=AUDIT_ADMIN_ACTION,
+        success=True,
+        description=(
+            f"Item {item.id} rejected by administrator. "
+            f"Reason: {normalized_reason}"
+        ),
+        user_id=reviewer_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    return updated_item

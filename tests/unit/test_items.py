@@ -29,11 +29,13 @@ import pytest
 
 from app.models.user import User
 from app.services.item import (
+    approve_item,
     create_item,
     delete_item,
     get_item,
     list_items,
     list_user_items,
+    reject_item,
     update_item,
 )
 
@@ -47,6 +49,7 @@ def create_test_user(
     db,
     *,
     user_id: int,
+    role: str = "user",
 ):
     """
     Create a minimal valid User required by Item.user_id.
@@ -67,7 +70,7 @@ def create_test_user(
         last_name="User",
         email=f"testuser{user_id}@trackit.test",
         password_hash="test-password-hash",
-        role="user",
+        role=role,
         is_active=True,
         is_verified=True,
     )
@@ -855,3 +858,161 @@ def test_update_preserves_unspecified_fields(db):
     assert updated.description == "Original laptop description."
     assert updated.category == "Electronics"
     assert updated.location == "Library"
+
+    # ============================================================================
+# MODERATION
+# ============================================================================
+
+
+def test_admin_can_approve_pending_item(db, admin_user):
+    """
+    A pending item can be approved by the moderation service.
+    """
+
+    item = create_test_item(db)
+
+    assert item.status == "pending"
+
+    approved = approve_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert approved.status == "approved"
+
+
+def test_admin_can_reject_pending_item(db, admin_user):
+    """
+    A pending item can be rejected.
+    """
+
+    item = create_test_item(db)
+
+    rejected = reject_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+        rejection_reason="Insufficient information.",
+    )
+
+    assert rejected.status == "rejected"
+
+
+def test_cannot_approve_already_approved_item(db, admin_user):
+    """
+    An approved item cannot be approved again.
+    """
+
+    item = create_test_item(db)
+
+    approve_item(
+        db,
+        item=item,
+        reviewer_id= admin_user.id,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending items",
+    ):
+        approve_item(
+            db,
+            item=item,
+            reviewer_id=admin_user.id,
+        )
+
+
+def test_cannot_reject_approved_item(db, admin_user):
+    """
+    An approved item cannot subsequently be rejected.
+    """
+
+    item = create_test_item(db)
+
+    approve_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending items",
+    ):
+        reject_item(
+            db,
+            item=item,
+            reviewer_id=99,
+            rejection_reason="Too late.",
+        )
+
+
+def test_cannot_approve_rejected_item(db, admin_user):
+    """
+    A rejected item cannot subsequently be approved.
+    """
+
+    item = create_test_item(db)
+
+    reject_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+        rejection_reason="Invalid submission.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending items",
+    ):
+        approve_item(
+            db,
+            item=item,
+            reviewer_id=admin_user.id,
+        )
+
+
+def test_cannot_reject_rejected_item_again(db, admin_user):
+    """
+    A rejected item cannot be rejected again.
+    """
+
+    item = create_test_item(db)
+
+    reject_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+        rejection_reason="Invalid submission.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending items",
+    ):
+        reject_item(
+            db,
+            item=item,
+            reviewer_id=admin_user.id,
+            rejection_reason="Another reason.",
+        )
+
+
+def test_rejection_requires_reason(db):
+    """
+    Rejection must contain a non-empty reason.
+    """
+
+    item = create_test_item(db)
+
+    with pytest.raises(
+        ValueError,
+        match="Rejection reason",
+    ):
+        reject_item(
+            db,
+            item=item,
+            reviewer_id=99,
+            rejection_reason="   ",
+        )

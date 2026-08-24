@@ -32,20 +32,28 @@ Security principles:
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_current_verified_user
+from app.api.deps import (
+    get_current_admin,
+    get_current_verified_user,
+)
+
 from app.db.dependencies import get_db
 from app.models.user import User
 from app.schemas.item import (
     ItemCreate,
+    ItemReject,
     ItemResponse,
     ItemUpdate,
+
 )
 from app.services.item import (
+    approve_item,
     create_item,
     delete_item,
     get_item,
     list_items,
     list_user_items,
+    reject_item,
     update_item,
 )
 
@@ -188,6 +196,95 @@ def list_my_items_endpoint(
         user_id=current_user.id,
     )
 
+
+# ============================================================================
+# ADMIN MODERATION
+# ============================================================================
+
+
+@router.patch(
+    "/{item_id}/approve",
+    response_model=ItemResponse,
+    summary="Approve an item",
+)
+def approve_item_endpoint(
+    item_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """
+    Approve a pending item.
+
+    Administrator authorization is required.
+    """
+
+    item = get_item(
+        db,
+        item_id=item_id,
+    )
+
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Item not found.",
+        )
+
+    try:
+        return approve_item(
+            db,
+            item=item,
+            reviewer_id=current_admin.id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+@router.patch(
+    "/{item_id}/reject",
+    response_model=ItemResponse,
+    summary="Reject an item",
+)
+def reject_item_endpoint(
+    item_id: int,
+    payload: ItemReject,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """
+    Reject a pending item.
+
+    Administrator authorization is required.
+    A rejection reason is mandatory.
+    """
+
+    item = get_item(
+        db,
+        item_id=item_id,
+    )
+
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Item not found.",
+        )
+
+    try:
+        return reject_item(
+            db,
+            item=item,
+            reviewer_id=current_admin.id,
+            rejection_reason=payload.reason,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
 
 # ============================================================================
 # GET SINGLE ITEM
