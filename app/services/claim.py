@@ -107,7 +107,7 @@ def create_claim(
     
     if item.status !="approved":
         raise ValueError(
-            "claims can only be submitted for approved"
+            "claims can only be submitted for approved items."
         )
 
     if item.user_id == claimant_id:
