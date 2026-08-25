@@ -183,6 +183,264 @@ def test_user_cannot_claim_own_item(
 
     assert response.status_code == 403
 
+# ============================================================================
+# CLAIM CREATION VALIDATION
+# ============================================================================
+
+
+def test_user_cannot_claim_lost_item(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1023,
+        username="apiowner_lost",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1024,
+        username="apiclaimant_lost",
+    )
+
+    item = Item(
+        user_id=owner.id,
+        title="Lost Test Phone",
+        description="A lost item cannot receive claims.",
+        type="lost",
+        category="Electronics",
+        location="Main Library",
+        status="approved",
+    )
+
+    db.add(item)
+    db.flush()
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I believe this item belongs to me.",
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert (
+        "found items"
+        in response.json()["detail"].lower()
+    )
+
+
+def test_user_cannot_claim_pending_item(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1025,
+        username="apiowner_pending",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1026,
+        username="apiclaimant_pending",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+        status="pending",
+    )
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can provide proof that this is mine.",
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert (
+        "approved"
+        in response.json()["detail"].lower()
+    )
+
+
+def test_user_cannot_claim_rejected_item(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1027,
+        username="apiowner_rejected",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1028,
+        username="apiclaimant_rejected",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+        status="rejected",
+    )
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I have proof that this item belongs to me.",
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert (
+        "approved"
+        in response.json()["detail"].lower()
+    )
+
+
+def test_user_cannot_claim_already_claimed_item(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1029,
+        username="apiowner_claimed",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1030,
+        username="apiclaimant_claimed",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+        status="claimed",
+    )
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can provide evidence of ownership.",
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert (
+        "approved"
+        in response.json()["detail"].lower()
+    )
+
+
+def test_cannot_claim_nonexistent_item(
+    client,
+    db,
+):
+    claimant = create_user(
+        db,
+        user_id=1031,
+        username="apiclaimant_missing_item",
+    )
+
+    response = client.post(
+        "/api/claims/items/999999",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I am trying to claim a nonexistent item.",
+        },
+    )
+
+    assert response.status_code == 404
+
+    assert (
+        response.json()["detail"]
+        == "Item not found."
+    )
+
+
+def test_claim_reason_too_short_returns_validation_error(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1032,
+        username="apiowner_short_reason",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1033,
+        username="apiclaimant_short_reason",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "Short",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_claim_reason_whitespace_is_normalized(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1034,
+        username="apiowner_whitespace",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1035,
+        username="apiclaimant_whitespace",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "   I can prove ownership of this item.   ",
+        },
+    )
+
+    assert response.status_code == 201
+
+    assert (
+        response.json()["reason"]
+        == "I can prove ownership of this item."
+    )
+
 
 # ============================================================================
 # DUPLICATE CLAIMS

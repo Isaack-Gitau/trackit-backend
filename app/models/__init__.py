@@ -11,6 +11,7 @@ from app.models.auth_token import AuthToken
 from app.models.claim import Claim
 from app.models.audit_log import AuditLog
 from app.models.report import Report
+from app.models.notification import Notification
 
 __all__ = [
     "User",
@@ -18,5 +19,6 @@ __all__ = [
     "AuthToken",
     "AuditLog",
     "Claim",
-    "Report"
+    "Report",
+    "Notification",
 ]

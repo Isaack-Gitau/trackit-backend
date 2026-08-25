@@ -198,3 +198,11 @@ class User(Base):
         back_populates="reviewer",
         passive_deletes=True,
     )
+
+    notifications = relationship(
+        "Notification",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
