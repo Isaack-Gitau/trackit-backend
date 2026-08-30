@@ -58,6 +58,13 @@ from app.services.claim import (
     withdraw_claim,
 )
 
+from app.services.notification import (
+    NOTIFICATION_CLAIM_APPROVED,
+    NOTIFICATION_CLAIM_CREATED,
+    NOTIFICATION_CLAIM_REJECTED,
+    NOTIFICATION_CLAIM_WITHDRAWN,
+    list_user_notifications,
+)
 
 # ============================================================================
 # TEST CONSTANTS
@@ -216,6 +223,34 @@ def test_create_claim_successfully(db):
     assert claim.claimant_id == TEST_CLAIMANT_ID
     assert claim.reason.startswith("This phone belongs")
     assert claim.status == CLAIM_STATUS_PENDING
+
+def test_create_claim_notifies_item_owner(db):
+    """
+    Creating a claim should notify the owner of the found item.
+    """
+
+    item, claim = create_test_claim(db)
+
+    notifications = list_user_notifications(
+        db,
+        user_id=TEST_ITEM_OWNER_ID,
+    )
+
+    matching = [
+        notification
+        for notification in notifications
+        if notification.type == NOTIFICATION_CLAIM_CREATED
+    ]
+
+    assert len(matching) == 1
+
+    notification = matching[0]
+
+    assert notification.user_id == TEST_ITEM_OWNER_ID
+    assert notification.is_read is False
+    assert "claim" in notification.message.lower()
+    assert item.title in notification.message
+    assert claim.id is not None
 
 
 def test_create_claim_strips_reason_whitespace(db):
@@ -706,6 +741,40 @@ def test_claimant_can_withdraw_pending_claim(db):
 
     assert result.status == CLAIM_STATUS_WITHDRAWN
 
+def test_withdraw_claim_notifies_item_owner(db):
+    """
+    Withdrawing a claim should notify the owner of the found item.
+    """
+
+    item, claim = create_test_claim(db)
+
+    result = withdraw_claim(
+        db,
+        claim=claim,
+        claimant_id=TEST_CLAIMANT_ID,
+    )
+
+    assert result.status == CLAIM_STATUS_WITHDRAWN
+
+    notifications = list_user_notifications(
+        db,
+        user_id=TEST_ITEM_OWNER_ID,
+    )
+
+    matching = [
+        notification
+        for notification in notifications
+        if notification.type == NOTIFICATION_CLAIM_WITHDRAWN
+    ]
+
+    assert len(matching) == 1
+
+    notification = matching[0]
+
+    assert notification.user_id == TEST_ITEM_OWNER_ID
+    assert notification.is_read is False
+    assert item.title in notification.message
+    assert "withdrawn" in notification.message.lower()
 
 def test_non_claimant_cannot_withdraw_claim(db):
     """
@@ -785,6 +854,45 @@ def test_admin_can_approve_pending_claim(db):
         datetime,
     )
 
+def test_approve_claim_notifies_claimant(db):
+    """
+    Approving a claim should notify the claimant.
+    """
+
+    item, claim = create_test_claim(db)
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REVIEWER_ID,
+    )
+
+    result = approve_claim(
+        db,
+        claim=claim,
+        reviewer_id=reviewer.id,
+    )
+
+    assert result.status == CLAIM_STATUS_APPROVED
+
+    notifications = list_user_notifications(
+        db,
+        user_id=TEST_CLAIMANT_ID,
+    )
+
+    matching = [
+        notification
+        for notification in notifications
+        if notification.type == NOTIFICATION_CLAIM_APPROVED
+    ]
+
+    assert len(matching) == 1
+
+    notification = matching[0]
+
+    assert notification.user_id == TEST_CLAIMANT_ID
+    assert notification.is_read is False
+    assert item.title in notification.message
+    assert "approved" in notification.message.lower()
 
 def test_approving_claim_marks_item_as_claimed(db):
     """
@@ -1014,6 +1122,50 @@ def test_admin_can_reject_pending_claim(db):
         == "The claimant could not provide proof."
     )
 
+def test_reject_claim_notifies_claimant(db):
+    """
+    Rejecting a claim should notify the claimant and include
+    the rejection reason.
+    """
+
+    item, claim = create_test_claim(db)
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_REJECTION_REVIEWER_ID,
+    )
+
+    rejection_reason = "Ownership could not be verified."
+
+    result = reject_claim(
+        db,
+        claim=claim,
+        reviewer_id=reviewer.id,
+        rejection_reason=rejection_reason,
+    )
+
+    assert result.status == CLAIM_STATUS_REJECTED
+
+    notifications = list_user_notifications(
+        db,
+        user_id=TEST_CLAIMANT_ID,
+    )
+
+    matching = [
+        notification
+        for notification in notifications
+        if notification.type == NOTIFICATION_CLAIM_REJECTED
+    ]
+
+    assert len(matching) == 1
+
+    notification = matching[0]
+
+    assert notification.user_id == TEST_CLAIMANT_ID
+    assert notification.is_read is False
+    assert item.title in notification.message
+    assert "rejected" in notification.message.lower()
+    assert rejection_reason in notification.message
 
 def test_rejection_reason_is_stripped(db):
     """
@@ -1464,3 +1616,43 @@ def test_rejected_claim_can_be_resubmitted_and_approved(db):
 
     assert historical_claim.status == CLAIM_STATUS_REJECTED
     assert final_claim.status == CLAIM_STATUS_APPROVED
+
+
+def test_approve_claim_notification_is_sent_only_to_claimant(db):
+    """
+    An approval notification must belong to the claimant and
+    must not be sent to the item owner.
+    """
+
+    item, claim = create_test_claim(db)
+
+    reviewer = create_test_reviewer(
+        db,
+        user_id=TEST_APPROVAL_REVIEWER_ID,
+    )
+
+    approve_claim(
+        db,
+        claim=claim,
+        reviewer_id=reviewer.id,
+    )
+
+    claimant_notifications = list_user_notifications(
+        db,
+        user_id=TEST_CLAIMANT_ID,
+    )
+
+    owner_notifications = list_user_notifications(
+        db,
+        user_id=TEST_ITEM_OWNER_ID,
+    )
+
+    assert any(
+        notification.type == NOTIFICATION_CLAIM_APPROVED
+        for notification in claimant_notifications
+    )
+
+    assert not any(
+        notification.type == NOTIFICATION_CLAIM_APPROVED
+        for notification in owner_notifications
+    )

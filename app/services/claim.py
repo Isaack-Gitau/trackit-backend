@@ -27,6 +27,7 @@ Security principles:
 - Only pending claims may be reviewed or withdrawn.
 - Rejection requires a reason.
 - Security-relevant actions are audited.
+- Claim lifecycle events generate user notifications.
 """
 
 from datetime import datetime, timezone
@@ -35,6 +36,7 @@ from sqlalchemy.orm import Session
 
 from app.models.claim import Claim
 from app.models.item import Item
+
 from app.repositories.claims import (
     create_claim as repository_create_claim,
     get_active_claim_by_user_and_item,
@@ -49,10 +51,19 @@ from app.repositories.claims import (
 from app.repositories.items import (
     update_item_status as repository_update_item_status,
 )
+
 from app.services.audit_log import (
     AUDIT_CLAIM_CREATED,
     AUDIT_CLAIM_UPDATED,
     create_audit_log,
+)
+
+from app.services.notification import (
+    NOTIFICATION_CLAIM_APPROVED,
+    NOTIFICATION_CLAIM_CREATED,
+    NOTIFICATION_CLAIM_REJECTED,
+    NOTIFICATION_CLAIM_WITHDRAWN,
+    create_notification,
 )
 
 
@@ -92,10 +103,12 @@ def create_claim(
 
     - Item must exist.
     - Item must be FOUND.
+    - Item must be approved.
     - Claimant cannot own the item.
     - Claimant cannot already have an active claim.
     - Claim starts as pending.
     - Claim creation is audited.
+    - The item owner receives a notification.
 
     The claimant ID must come from the authenticated user.
     """
@@ -104,8 +117,8 @@ def create_claim(
         raise ValueError(
             "Claims can only be submitted for found items."
         )
-    
-    if item.status !="approved":
+
+    if item.status != "approved":
         raise ValueError(
             "claims can only be submitted for approved items."
         )
@@ -150,6 +163,17 @@ def create_claim(
         user_id=claimant_id,
         ip_address=ip_address,
         user_agent=user_agent,
+    )
+
+    create_notification(
+        db,
+        user_id=item.user_id,
+        notification_type=NOTIFICATION_CLAIM_CREATED,
+        title="New claim submitted",
+        message=(
+            f"Someone has submitted a claim for your found item "
+            f" \"{item.title}\"."
+        ),
     )
 
     return claim
@@ -252,6 +276,9 @@ def withdraw_claim(
     Withdraw a pending claim.
 
     Only the claimant may withdraw their own claim.
+
+    The item owner receives a notification after a successful
+    withdrawal.
     """
 
     if claim.claimant_id != claimant_id:
@@ -281,6 +308,17 @@ def withdraw_claim(
         user_agent=user_agent,
     )
 
+    create_notification(
+        db,
+        user_id=claim.item.user_id,
+        notification_type=NOTIFICATION_CLAIM_WITHDRAWN,
+        title="Claim withdrawn",
+        message=(
+            f"A claim for your found item "
+            f"\"{claim.item.title}\" has been withdrawn."
+        ),
+    )
+
     return updated_claim
 
 
@@ -305,6 +343,7 @@ def approve_claim(
     - Only pending claims can be approved.
     - An item may have only one approved claim.
     - Once a claim is approved, the associated item becomes claimed.
+    - The claimant receives a notification.
     - The caller is responsible for administrator authorization.
     """
 
@@ -358,6 +397,17 @@ def approve_claim(
         user_agent=user_agent,
     )
 
+    create_notification(
+        db,
+        user_id=claim.claimant_id,
+        notification_type=NOTIFICATION_CLAIM_APPROVED,
+        title="Claim approved",
+        message=(
+            f"Your claim for \"{claim.item.title}\" "
+            f"has been approved."
+        ),
+    )
+
     return updated_claim
 
 
@@ -379,6 +429,9 @@ def reject_claim(
     Reject a pending claim.
 
     A rejection reason is mandatory for accountability.
+
+    The claimant receives a notification containing the rejection
+    reason.
 
     The caller is responsible for ensuring that reviewer_id
     belongs to an authorized administrator.
@@ -417,6 +470,17 @@ def reject_claim(
         user_id=reviewer_id,
         ip_address=ip_address,
         user_agent=user_agent,
+    )
+
+    create_notification(
+        db,
+        user_id=claim.claimant_id,
+        notification_type=NOTIFICATION_CLAIM_REJECTED,
+        title="Claim rejected",
+        message=(
+            f"Your claim for \"{claim.item.title}\" "
+            f"was rejected. Reason: {normalized_reason}"
+        ),
     )
 
     return updated_claim

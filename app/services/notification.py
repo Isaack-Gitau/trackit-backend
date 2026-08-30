@@ -24,6 +24,9 @@ Responsibilities:
 - Count unread notifications.
 - Mark individual notifications as read.
 - Mark all notifications belonging to a user as read.
+- Delete individual notifications.
+- Delete selected notifications.
+- Delete all notifications belonging to a user.
 
 Security principles:
 
@@ -41,6 +44,9 @@ from app.models.notification import Notification
 from app.repositories.notifications import (
     count_unread_notifications as repository_count_unread_notifications,
     create_notification as repository_create_notification,
+    delete_all_notifications_by_user as repository_delete_all_notifications_by_user,
+    delete_notification as repository_delete_notification,
+    delete_selected_notifications as repository_delete_selected_notifications,
     get_notification_by_id,
     get_notifications_by_user,
     get_unread_notifications_by_user,
@@ -52,6 +58,10 @@ from app.repositories.notifications import (
 # ============================================================================
 # NOTIFICATION TYPES
 # ============================================================================
+
+
+NOTIFICATION_ITEM_APPROVED = "item_approved"
+NOTIFICATION_ITEM_REJECTED = "item_rejected"
 
 NOTIFICATION_CLAIM_CREATED = "claim_created"
 NOTIFICATION_CLAIM_APPROVED = "claim_approved"
@@ -286,6 +296,112 @@ def mark_all_notifications_as_read(
         return 0
 
     return repository_mark_all_notifications_as_read(
+        db,
+        user_id=user_id,
+    )
+
+
+# ============================================================================
+# DELETE — ONE NOTIFICATION
+# ============================================================================
+
+
+def delete_notification(
+    db: Session,
+    *,
+    notification: Notification,
+    user_id: int,
+) -> None:
+    """
+    Permanently delete one notification.
+
+    The notification must belong to the authenticated user.
+
+    Raises PermissionError when another user's notification is supplied.
+    """
+
+    if user_id <= 0:
+        raise PermissionError(
+            "You are not authorized to delete this notification."
+        )
+
+    if notification.user_id != user_id:
+        raise PermissionError(
+            "You are not authorized to delete this notification."
+        )
+
+    repository_delete_notification(
+        db,
+        notification,
+    )
+
+
+# ============================================================================
+# DELETE — SELECTED NOTIFICATIONS
+# ============================================================================
+
+
+def delete_selected_notifications(
+    db: Session,
+    *,
+    user_id: int,
+    notification_ids: list[int],
+) -> int:
+    """
+    Permanently delete selected notifications belonging to the
+    authenticated user.
+
+    Notification IDs belonging to other users are ignored.
+
+    Nonexistent notification IDs are ignored.
+
+    Returns the number of notifications actually deleted.
+    """
+
+    if user_id <= 0:
+        return 0
+
+    if not notification_ids:
+        return 0
+
+    normalized_ids = sorted(
+        {
+            notification_id
+            for notification_id in notification_ids
+            if notification_id > 0
+        }
+    )
+
+    if not normalized_ids:
+        return 0
+
+    return repository_delete_selected_notifications(
+        db,
+        user_id=user_id,
+        notification_ids=normalized_ids,
+    )
+
+
+# ============================================================================
+# DELETE — ALL NOTIFICATIONS
+# ============================================================================
+
+
+def delete_all_notifications(
+    db: Session,
+    *,
+    user_id: int,
+) -> int:
+    """
+    Permanently delete all notifications belonging to the authenticated user.
+
+    Returns the number of notifications deleted.
+    """
+
+    if user_id <= 0:
+        return 0
+
+    return repository_delete_all_notifications_by_user(
         db,
         user_id=user_id,
     )

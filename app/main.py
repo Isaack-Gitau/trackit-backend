@@ -31,7 +31,7 @@ from app.routers.auth import router as auth_router
 from app.routers.items import router as items_router
 from app.routers.claims import router as claims_router
 from app.routers.reports import router as reports_router
-
+from app.routers.notifications import router as notifications_router
 # ============================================================================
 # APPLICATION
 # ============================================================================
@@ -85,6 +85,15 @@ app.include_router(
 
 app.include_router(
     reports_router,
+    prefix="/api",
+)
+
+# ============================================================================
+# NOTIFICATION API
+# ============================================================================
+
+app.include_router(
+    notifications_router,
     prefix="/api",
 )
 

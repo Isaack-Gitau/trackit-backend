@@ -1,25 +1,39 @@
+
 """
 TRACKIT Item Service.
 
 Business logic for creating, retrieving, updating,
-and deleting lost and found items.
+deleting, and administratively moderating lost and
+found items.
 
 Architecture:
 
-Router
-    ↓
-Schema / Validation
-    ↓
-Service / Business Rules
-    ↓
-Repository / Database Access
-    ↓
-Model
+    Router
+        ↓
+    Schema / Validation
+        ↓
+    Service / Business Rules
+        ↓
+    Repository / Database Access
+        ↓
+    Model
+
+Security principles:
+
+- Item ownership is based on the authenticated user.
+- Clients cannot choose another user's identity.
+- Only valid item types may be created or updated.
+- New items always begin as pending.
+- Only pending items may be approved or rejected.
+- Rejection requires a reason.
+- Administrator actions are audited.
+- Item moderation events generate user notifications.
 """
 
 from sqlalchemy.orm import Session
 
 from app.models.item import Item
+
 from app.repositories.items import (
     create_item as repository_create_item,
     delete_item as repository_delete_item,
@@ -32,8 +46,15 @@ from app.repositories.items import (
 
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
-    create_audit_log
+    create_audit_log,
 )
+
+from app.services.notification import (
+    NOTIFICATION_ITEM_APPROVED,
+    NOTIFICATION_ITEM_REJECTED,
+    create_notification,
+)
+
 
 # ============================================================================
 # ITEM STATUS
@@ -66,11 +87,17 @@ def create_item(
     """
     Create a new TRACKIT item.
 
-    New items always begin with pending status.
+    Business rules:
+
+    - Item type must be either 'lost' or 'found'.
+    - New items always begin with pending status.
+    - Persistence is delegated to the repository.
     """
 
     if item_type not in {"lost", "found"}:
-        raise ValueError("Item type must be 'lost' or 'found'.")
+        raise ValueError(
+            "Item type must be 'lost' or 'found'."
+        )
 
     return repository_create_item(
         db,
@@ -85,7 +112,7 @@ def create_item(
 
 
 # ============================================================================
-# READ
+# READ — SINGLE ITEM
 # ============================================================================
 
 
@@ -104,6 +131,11 @@ def get_item(
     )
 
 
+# ============================================================================
+# READ — ALL ITEMS
+# ============================================================================
+
+
 def list_items(
     db: Session,
     *,
@@ -116,14 +148,21 @@ def list_items(
     limit: int = 20,
 ) -> list[Item]:
     """
-    Retrieve items with filtering and pagination.
+    Retrieve items with optional filtering and pagination.
+
+    Pagination is handled at the service boundary while
+    actual database querying remains in the repository.
     """
 
     if page < 1:
-        raise ValueError("Page must be greater than or equal to 1.")
+        raise ValueError(
+            "Page must be greater than or equal to 1."
+        )
 
     if limit < 1 or limit > 100:
-        raise ValueError("Limit must be between 1 and 100.")
+        raise ValueError(
+            "Limit must be between 1 and 100."
+        )
 
     offset = (page - 1) * limit
 
@@ -139,6 +178,11 @@ def list_items(
     )
 
 
+# ============================================================================
+# READ — USER ITEMS
+# ============================================================================
+
+
 def list_user_items(
     db: Session,
     *,
@@ -146,6 +190,9 @@ def list_user_items(
 ) -> list[Item]:
     """
     Retrieve all items belonging to a specific user.
+
+    The caller is responsible for ensuring that user_id
+    represents the authenticated user.
     """
 
     return get_items_by_user(
@@ -174,7 +221,11 @@ def update_item(
     """
     Update an item belonging to the authenticated user.
 
-    Ownership is enforced here rather than in the repository.
+    Business rules:
+
+    - Only the item owner may modify the item.
+    - Item type, when supplied, must be 'lost' or 'found'.
+    - Unspecified fields remain unchanged.
     """
 
     if item.user_id != user_id:
@@ -182,7 +233,10 @@ def update_item(
             "You are not authorized to modify this item."
         )
 
-    if item_type is not None and item_type not in {"lost", "found"}:
+    if item_type is not None and item_type not in {
+        "lost",
+        "found",
+    }:
         raise ValueError(
             "Item type must be 'lost' or 'found'."
         )
@@ -212,6 +266,8 @@ def delete_item(
 ) -> None:
     """
     Delete an item belonging to the authenticated user.
+
+    Ownership authorization is enforced by the service layer.
     """
 
     if item.user_id != user_id:
@@ -224,8 +280,9 @@ def delete_item(
         item,
     )
 
+
 # ============================================================================
-# MODERATION
+# MODERATION — APPROVE
 # ============================================================================
 
 
@@ -244,7 +301,8 @@ def approve_item(
 
     - Only pending items may be approved.
     - Reviewer identity comes from the authenticated administrator.
-    - Approval is audited.
+    - The approval action is audited.
+    - The item owner receives an approval notification.
     """
 
     if item.status != ITEM_STATUS_PENDING:
@@ -270,7 +328,23 @@ def approve_item(
         user_agent=user_agent,
     )
 
+    create_notification(
+        db,
+        user_id=item.user_id,
+        notification_type=NOTIFICATION_ITEM_APPROVED,
+        title="Item approved",
+        message=(
+            f"Your {item.type} item "
+            f"\"{item.title}\" has been approved."
+        ),
+    )
+
     return updated_item
+
+
+# ============================================================================
+# MODERATION — REJECT
+# ============================================================================
 
 
 def reject_item(
@@ -288,9 +362,10 @@ def reject_item(
     Business rules:
 
     - Only pending items may be rejected.
-    - Rejection requires a reason.
+    - Rejection requires a non-empty reason.
     - Reviewer identity comes from the authenticated administrator.
-    - Rejection is audited.
+    - The rejection action is audited.
+    - The item owner receives a rejection notification.
     """
 
     if item.status != ITEM_STATUS_PENDING:
@@ -322,6 +397,18 @@ def reject_item(
         user_id=reviewer_id,
         ip_address=ip_address,
         user_agent=user_agent,
+    )
+
+    create_notification(
+        db,
+        user_id=item.user_id,
+        notification_type=NOTIFICATION_ITEM_REJECTED,
+        title="Item rejected",
+        message=(
+            f"Your {item.type} item "
+            f"\"{item.title}\" was rejected. "
+            f"Reason: {normalized_reason}"
+        ),
     )
 
     return updated_item
