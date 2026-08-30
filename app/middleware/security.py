@@ -8,6 +8,7 @@ Provides global HTTP security protections:
 - Trusted-host protection
 - Security response headers
 - Content Security Policy
+- HTTP Strict Transport Security (HSTS)
 - Swagger UI compatibility
 
 Authentication-specific protections such as JWT validation
@@ -62,7 +63,13 @@ class SecurityHeadersMiddleware:
     - MIME sniffing
     - unnecessary referrer leakage
     - unwanted browser capabilities
+    - insecure transport downgrade attacks
     - unauthorized resource loading
+
+    HSTS is only added when explicitly enabled through
+    configuration. This prevents development environments
+    using plain HTTP from accidentally receiving an HSTS
+    policy.
     """
 
     def __init__(
@@ -71,12 +78,65 @@ class SecurityHeadersMiddleware:
     ) -> None:
         self.app = app
 
+    def _build_security_headers(self) -> dict[bytes, bytes]:
+        """
+        Build the configured security response headers.
+        """
+
+        headers: dict[bytes, bytes] = {
+            # Prevent MIME-type sniffing.
+            b"x-content-type-options": b"nosniff",
+
+            # Prevent clickjacking.
+            b"x-frame-options": b"DENY",
+
+            # Restrict referrer information.
+            b"referrer-policy": (
+                settings.REFERRER_POLICY.encode()
+            ),
+
+            # Restrict browser capabilities.
+            b"permissions-policy": (
+                settings.PERMISSIONS_POLICY.encode()
+            ),
+
+            # Content Security Policy.
+            b"content-security-policy": (
+                settings.CONTENT_SECURITY_POLICY.encode()
+            ),
+        }
+
+        # --------------------------------------------------------------------
+        # HTTP Strict Transport Security
+        # --------------------------------------------------------------------
+
+        if settings.HSTS_ENABLED:
+            hsts_value = (
+                f"max-age={settings.HSTS_MAX_AGE}"
+            )
+
+            if settings.HSTS_INCLUDE_SUBDOMAINS:
+                hsts_value += "; includeSubDomains"
+
+            if settings.HSTS_PRELOAD:
+                hsts_value += "; preload"
+
+            headers[
+                b"strict-transport-security"
+            ] = hsts_value.encode()
+
+        return headers
+
     async def __call__(
         self,
         scope,
         receive,
         send,
     ):
+        """
+        Add security headers to HTTP responses.
+        """
+
         if scope["type"] != "http":
             await self.app(
                 scope,
@@ -96,28 +156,9 @@ class SecurityHeadersMiddleware:
                     for key, _ in headers
                 }
 
-                security_headers = {
-                    # Prevent MIME-type sniffing.
-                    b"x-content-type-options": b"nosniff",
-
-                    # Prevent clickjacking.
-                    b"x-frame-options": b"DENY",
-
-                    # Restrict referrer information.
-                    b"referrer-policy": (
-                        settings.REFERRER_POLICY.encode()
-                    ),
-
-                    # Restrict browser capabilities.
-                    b"permissions-policy": (
-                        settings.PERMISSIONS_POLICY.encode()
-                    ),
-
-                    # Content Security Policy.
-                    b"content-security-policy": (
-                        settings.CONTENT_SECURITY_POLICY.encode()
-                    ),
-                }
+                security_headers = (
+                    self._build_security_headers()
+                )
 
                 for key, value in security_headers.items():
                     if key not in existing_headers:
@@ -157,6 +198,9 @@ def configure_security_middleware(
 
     SecurityHeadersMiddleware:
         Adds defensive HTTP security headers.
+
+    HSTS:
+        Enabled only when explicitly configured.
 
     Swagger UI:
         The CSP permits the external resources required by

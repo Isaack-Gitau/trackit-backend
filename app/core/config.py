@@ -89,13 +89,17 @@ class Settings(BaseSettings):
     # ========================================================================
 
     """
-    Allowed frontend origins.
+    Allowed browser origins.
 
     Development default:
         http://localhost:5500
 
-    In production, this should be explicitly configured
-    through the environment.
+    Production:
+        Must be explicitly configured through the environment.
+
+    Multiple origins may be supplied as a comma-separated value:
+
+        CORS_ALLOWED_ORIGINS=https://trackit.example,https://www.trackit.example
     """
 
     CORS_ALLOWED_ORIGINS: str = (
@@ -111,13 +115,18 @@ class Settings(BaseSettings):
     """
     Allowed HTTP Host headers.
 
-    Development/test:
-    -localhost
-    -127.0.0.1
-    -testserver
+    Development/test defaults:
 
-    Production deployments should explicitly configure
-    the real API hostname through the environment.
+        localhost
+        127.0.0.1
+        testserver
+
+    Production:
+        Must be explicitly configured through the environment.
+
+    Multiple hosts may be supplied as a comma-separated value:
+
+        TRUSTED_HOSTS=api.trackit.example,trackit.example
     """
 
     TRUSTED_HOSTS: str = (
@@ -131,6 +140,26 @@ class Settings(BaseSettings):
     # ========================================================================
 
     SECURITY_HEADERS_ENABLED: bool = True
+
+    """
+    Enable HTTP Strict Transport Security.
+
+    This should only be enabled when TRACKIT is served over HTTPS.
+
+    Development:
+        false
+
+    Production:
+        true
+    """
+
+    HSTS_ENABLED: bool = False
+
+    HSTS_MAX_AGE: int = 31536000
+
+    HSTS_INCLUDE_SUBDOMAINS: bool = True
+
+    HSTS_PRELOAD: bool = False
 
     CONTENT_SECURITY_POLICY: str = (
         "default-src 'self'; "
@@ -154,26 +183,75 @@ class Settings(BaseSettings):
     )
 
     # ========================================================================
-    # Pydantic Settings Configuration
-    # ========================================================================
-
-        # ========================================================================
     # Email / SMTP
     # ========================================================================
 
     SMTP_HOST: str = "smtp.gmail.com"
+
     SMTP_PORT: int = 587
 
     SMTP_USERNAME: str
+
     SMTP_PASSWORD: str
 
     SMTP_FROM_EMAIL: str
+
     SMTP_FROM_NAME: str = "TRACKIT"
 
     SMTP_USE_TLS: bool = True
 
-    # Frontend URL used in verification/password-reset links.
-    FRONTEND_URL: str = "http://localhost:5500"
+    # ------------------------------------------------------------------------
+    # Frontend
+    # ------------------------------------------------------------------------
+
+    FRONTEND_URL: str = (
+        "http://localhost:5500"
+    )
+
+    # ========================================================================
+    # Rate-Limit Storage
+    # ========================================================================
+
+    """
+    Rate-limit storage backend.
+
+    Development:
+        memory or redis
+
+    Production:
+        redis
+    """
+
+    RATE_LIMIT_BACKEND: str = "memory"
+
+    """
+    Redis connection URL.
+
+    Development example:
+
+        redis://localhost:6379/0
+
+    Production:
+        Set through the environment/secrets manager.
+    """
+
+    REDIS_URL: str = (
+        "redis://localhost:6379/0"
+    )
+
+    """
+    Fail closed when the configured production rate-limit
+    backend is unavailable.
+
+    When enabled, protected authentication requests must not
+    silently bypass rate limiting if Redis becomes unavailable.
+    """
+
+    RATE_LIMIT_FAIL_CLOSED: bool = True
+
+    # ========================================================================
+    # Pydantic Settings Configuration
+    # ========================================================================
 
     model_config = SettingsConfigDict(
         env_file=".env",

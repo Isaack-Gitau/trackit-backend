@@ -17,6 +17,7 @@ Security principles:
 - Tokens are single-use.
 - Previous unused reset tokens are invalidated.
 - Password changes invalidate existing JWT sessions.
+- Password reset is performed as one database transaction.
 """
 
 from sqlalchemy.orm import Session
@@ -36,7 +37,7 @@ from app.services.user import change_user_password
 
 
 # ============================================================================
-# Create Password Reset Token
+# CREATE PASSWORD RESET TOKEN
 # ============================================================================
 
 
@@ -47,21 +48,13 @@ def create_password_reset_token(
     """
     Create a new password-reset token for a user.
 
-    Any previous unused password-reset tokens belonging
-    to the user are invalidated first.
+    create_auth_token() already invalidates previous unused
+    password-reset tokens, so invalidation is intentionally
+    performed only once.
 
     Returns:
         Raw password-reset token.
-
-    Security:
-        Only the SHA-256 hash is stored in PostgreSQL.
     """
-
-    invalidate_user_tokens(
-        db,
-        user_id=user.id,
-        token_type=PASSWORD_RESET_TOKEN_TYPE,
-    )
 
     return create_auth_token(
         db,
@@ -72,7 +65,7 @@ def create_password_reset_token(
 
 
 # ============================================================================
-# Retrieve User From Reset Token
+# RETRIEVE USER FROM RESET TOKEN
 # ============================================================================
 
 
@@ -93,7 +86,7 @@ def get_password_reset_user(
             or the associated user no longer exists.
     """
 
-    token: AuthToken | None = get_valid_token(
+    token = get_valid_token(
         db,
         raw_token=raw_token,
         token_type=PASSWORD_RESET_TOKEN_TYPE,
@@ -114,7 +107,7 @@ def get_password_reset_user(
 
 
 # ============================================================================
-# Reset User Password
+# RESET USER PASSWORD
 # ============================================================================
 
 
@@ -131,30 +124,32 @@ def reset_user_password(
 
     - Validates the reset token.
     - Validates password strength.
-    - Hashes the new password through the central security service.
+    - Changes the password.
     - Updates password_changed_at.
     - Increments token_version.
     - Invalidates existing JWT sessions.
-    - Consumes the reset token.
+    - Atomically consumes the reset token.
     - Invalidates any other unused reset tokens.
 
-    Returns:
+    Transaction behavior:
 
-        User
-            When the password reset succeeds.
+    This function does NOT commit.
 
-        None
-            When the token is invalid or expired.
+    The password change, token consumption, and token invalidation
+    remain part of the caller's transaction and therefore succeed
+    or roll back together.
     """
 
     # ------------------------------------------------------------------
     # Validate password
     # ------------------------------------------------------------------
 
-    validate_password_strength(new_password)
+    validate_password_strength(
+        new_password
+    )
 
     # ------------------------------------------------------------------
-    # Validate reset token
+    # Retrieve valid reset token
     # ------------------------------------------------------------------
 
     result = get_password_reset_user(
@@ -168,6 +163,18 @@ def reset_user_password(
     user, token = result
 
     # ------------------------------------------------------------------
+    # Atomically consume token BEFORE changing password
+    # ------------------------------------------------------------------
+
+    consumed = consume_token(
+        db,
+        token,
+    )
+
+    if not consumed:
+        return None
+
+    # ------------------------------------------------------------------
     # Change password
     # ------------------------------------------------------------------
 
@@ -175,15 +182,6 @@ def reset_user_password(
         db,
         user,
         new_password,
-    )
-
-    # ------------------------------------------------------------------
-    # Consume the token
-    # ------------------------------------------------------------------
-
-    consume_token(
-        db,
-        token,
     )
 
     # ------------------------------------------------------------------

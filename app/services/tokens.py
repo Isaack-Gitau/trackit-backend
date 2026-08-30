@@ -1,3 +1,4 @@
+
 """
 TRACKIT Authentication Token Service.
 
@@ -17,6 +18,12 @@ Security principles:
 - Expired tokens cannot be consumed.
 - Previous unused tokens of the same type are invalidated.
 - Token operations are scoped to the owning user.
+
+Transaction policy:
+
+- This service does NOT commit transactions.
+- The request/database boundary owns commit and rollback behavior.
+- Security-sensitive multi-step operations can therefore remain atomic.
 """
 
 from __future__ import annotations
@@ -25,15 +32,16 @@ import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from app.models.auth_token import AuthToken
 
 
 # ============================================================================
-# Token Types
+# TOKEN TYPES
 # ============================================================================
+
 
 EMAIL_VERIFICATION_TOKEN_TYPE = "email_verification"
 PASSWORD_RESET_TOKEN_TYPE = "password_reset"
@@ -46,15 +54,16 @@ ALLOWED_TOKEN_TYPES = {
 
 
 # ============================================================================
-# Token Lifetimes
+# TOKEN LIFETIMES
 # ============================================================================
+
 
 EMAIL_VERIFICATION_TOKEN_MINUTES = 30
 PASSWORD_RESET_TOKEN_MINUTES = 15
 
 
 # ============================================================================
-# Internal Helpers
+# INTERNAL HELPERS
 # ============================================================================
 
 
@@ -78,7 +87,7 @@ def _validate_token_type(token_type: str) -> None:
 
 
 # ============================================================================
-# Token Generation
+# TOKEN GENERATION
 # ============================================================================
 
 
@@ -116,7 +125,7 @@ def hash_token(raw_token: str) -> str:
 
 
 # ============================================================================
-# Token Creation
+# TOKEN CREATION
 # ============================================================================
 
 
@@ -130,8 +139,12 @@ def create_auth_token(
     """
     Create a new authentication token.
 
-    Before creating the new token, all currently unused tokens
-    of the same type belonging to the user are invalidated.
+    Previous unused tokens of the same type belonging to the
+    user are invalidated before the new token is created.
+
+    The database transaction is intentionally NOT committed here.
+
+    The caller/request transaction owns commit and rollback behavior.
 
     Args:
         db: Active SQLAlchemy database session.
@@ -140,11 +153,10 @@ def create_auth_token(
         expires_minutes: Lifetime of the token in minutes.
 
     Returns:
-        The raw token.
+        Raw authentication token.
 
-    Important:
-        Only the SHA-256 hash is stored in PostgreSQL.
-        The raw token is returned once to the caller.
+    Security:
+        Only the SHA-256 token hash is stored in PostgreSQL.
     """
 
     if user_id <= 0:
@@ -159,7 +171,7 @@ def create_auth_token(
             "Token expiration must be greater than zero."
         )
 
-    # Invalidate previous unused tokens of the same type.
+    # Invalidate previous unused tokens of this type.
     invalidate_user_tokens(
         db,
         user_id=user_id,
@@ -167,7 +179,10 @@ def create_auth_token(
     )
 
     raw_token = generate_raw_token()
-    token_hash = hash_token(raw_token)
+
+    token_hash = hash_token(
+        raw_token
+    )
 
     expires_at = (
         _utc_now()
@@ -183,14 +198,13 @@ def create_auth_token(
     )
 
     db.add(auth_token)
-    db.commit()
-    db.refresh(auth_token)
+    db.flush()
 
     return raw_token
 
 
 # ============================================================================
-# Token Lookup
+# TOKEN LOOKUP
 # ============================================================================
 
 
@@ -205,34 +219,41 @@ def get_valid_token(
 
     A token is valid only when:
 
-    - The raw token is non-empty.
-    - The token type is supported.
-    - The SHA-256 hash matches.
-    - The token has not been consumed.
-    - The token has not expired.
+    - the raw token is non-empty;
+    - the token type is supported;
+    - the SHA-256 hash matches;
+    - the token has not been consumed;
+    - the token has not expired.
 
     Returns:
-        The AuthToken object when valid, otherwise None.
+        AuthToken when valid, otherwise None.
     """
 
     if not raw_token:
         return None
 
-    _validate_token_type(token_type)
+    _validate_token_type(
+        token_type
+    )
+
+    normalized_token = raw_token.strip()
+
+    if not normalized_token:
+        return None
 
     token_hash = hash_token(
-        raw_token.strip()
+        normalized_token
     )
 
-    result = db.execute(
-        select(AuthToken).where(
-            AuthToken.token_hash == token_hash,
-            AuthToken.token_type == token_type,
-            AuthToken.used_at.is_(None),
-        )
+    statement = select(AuthToken).where(
+        AuthToken.token_hash == token_hash,
+        AuthToken.token_type == token_type,
+        AuthToken.used_at.is_(None),
     )
 
-    token = result.scalar_one_or_none()
+    token = db.scalar(
+        statement
+    )
 
     if token is None:
         return None
@@ -244,31 +265,65 @@ def get_valid_token(
 
 
 # ============================================================================
-# Token Consumption
+# TOKEN CONSUMPTION
 # ============================================================================
 
 
 def consume_token(
     db: Session,
     token: AuthToken,
-) -> None:
+) -> bool:
     """
-    Permanently consume an authentication token.
+    Atomically consume an authentication token.
 
-    Once consumed, the token cannot be used again.
+    The update succeeds only when the token is still unused.
+
+    This is important for concurrent password-reset or verification
+    requests. Two requests can no longer both successfully consume
+    the same token.
+
+    The database transaction is intentionally NOT committed here.
+
+    Returns:
+
+        True:
+            The token was consumed by this call.
+
+        False:
+            The token had already been consumed.
     """
 
     if token.used_at is not None:
-        return
+        return False
 
-    token.used_at = _utc_now()
+    consumed_at = _utc_now()
 
-    db.add(token)
-    db.commit()
+    statement = (
+        update(AuthToken)
+        .where(
+            AuthToken.id == token.id,
+            AuthToken.used_at.is_(None),
+        )
+        .values(
+            used_at=consumed_at,
+        )
+    )
+
+    result = db.execute(
+        statement
+    )
+
+    if result.rowcount != 1:
+        return False
+
+    # Keep the ORM instance synchronized with the database state.
+    token.used_at = consumed_at
+
+    return True
 
 
 # ============================================================================
-# Token Invalidation
+# TOKEN INVALIDATION
 # ============================================================================
 
 
@@ -282,6 +337,8 @@ def invalidate_user_tokens(
     Invalidate all unused tokens of a specific type belonging
     to a user.
 
+    The database transaction is intentionally NOT committed here.
+
     Returns:
         Number of tokens invalidated.
     """
@@ -291,33 +348,35 @@ def invalidate_user_tokens(
             "Invalid user ID."
         )
 
-    _validate_token_type(token_type)
+    _validate_token_type(
+        token_type
+    )
 
-    result = db.execute(
-        select(AuthToken).where(
+    now = _utc_now()
+
+    statement = (
+        update(AuthToken)
+        .where(
             AuthToken.user_id == user_id,
             AuthToken.token_type == token_type,
             AuthToken.used_at.is_(None),
         )
+        .values(
+            used_at=now,
+        )
     )
 
-    tokens = result.scalars().all()
+    result = db.execute(
+        statement
+    )
 
-    if not tokens:
-        return 0
-
-    now = _utc_now()
-
-    for token in tokens:
-        token.used_at = now
-
-    db.commit()
-
-    return len(tokens)
+    return int(
+        result.rowcount or 0
+    )
 
 
 # ============================================================================
-# User Token Cleanup
+# USER TOKEN CLEANUP
 # ============================================================================
 
 
@@ -331,9 +390,14 @@ def invalidate_all_user_tokens(
 
     This is useful during security-sensitive operations such as:
 
-    - Password changes
-    - Account deactivation
-    - Security resets
+    - password changes;
+    - account deactivation;
+    - security resets.
+
+    The database transaction is intentionally NOT committed here.
+
+    Returns:
+        Number of tokens invalidated.
     """
 
     if user_id <= 0:
@@ -341,30 +405,30 @@ def invalidate_all_user_tokens(
             "Invalid user ID."
         )
 
-    result = db.execute(
-        select(AuthToken).where(
+    now = _utc_now()
+
+    statement = (
+        update(AuthToken)
+        .where(
             AuthToken.user_id == user_id,
             AuthToken.used_at.is_(None),
         )
+        .values(
+            used_at=now,
+        )
     )
 
-    tokens = result.scalars().all()
+    result = db.execute(
+        statement
+    )
 
-    if not tokens:
-        return 0
-
-    now = _utc_now()
-
-    for token in tokens:
-        token.used_at = now
-
-    db.commit()
-
-    return len(tokens)
+    return int(
+        result.rowcount or 0
+    )
 
 
 # ============================================================================
-# Token Expiration Check
+# TOKEN EXPIRATION CHECK
 # ============================================================================
 
 
@@ -378,11 +442,17 @@ def is_token_expired(
     return token.expires_at <= _utc_now()
 
 
+# ============================================================================
+# TOKEN CONSUMPTION CHECK
+# ============================================================================
+
+
 def is_token_consumed(
     token: AuthToken,
 ) -> bool:
     """
-    Determine whether an authentication token has already been consumed.
+    Determine whether an authentication token has already
+    been consumed.
     """
 
     return token.used_at is not None

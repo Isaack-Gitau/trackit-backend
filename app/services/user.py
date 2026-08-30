@@ -13,6 +13,13 @@ Responsibilities:
 - Invalidate authentication sessions
 
 This module does NOT handle HTTP requests.
+
+Transaction policy:
+
+- User-service operations modify the active SQLAlchemy transaction.
+- Multi-step security operations must be able to roll back atomically.
+- Request-level database dependencies are responsible for committing
+  successful requests and rolling back failed requests.
 """
 
 from datetime import datetime, timezone
@@ -31,7 +38,7 @@ from app.repositories.users import (
 
 
 # ============================================================================
-# User Lookup
+# USER LOOKUP
 # ============================================================================
 
 
@@ -92,7 +99,7 @@ def get_user_by_login_service(
 
 
 # ============================================================================
-# Account Creation
+# ACCOUNT CREATION
 # ============================================================================
 
 
@@ -124,7 +131,9 @@ def create_user_account(
             "Email is already registered."
         )
 
-    password_hash = hash_password(password)
+    password_hash = hash_password(
+        password
+    )
 
     return create_user(
         db,
@@ -137,7 +146,7 @@ def create_user_account(
 
 
 # ============================================================================
-# Account Verification
+# ACCOUNT VERIFICATION
 # ============================================================================
 
 
@@ -147,23 +156,26 @@ def verify_user_email(
 ) -> User:
     """
     Mark a user's email address as verified.
+
+    The transaction is intentionally not committed here.
     """
 
     if user.is_verified:
         return user
 
     user.is_verified = True
-    user.updated_at = datetime.now(timezone.utc)
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
 
     return user
 
 
 # ============================================================================
-# Account Status
+# ACCOUNT STATUS
 # ============================================================================
 
 
@@ -173,14 +185,17 @@ def activate_user(
 ) -> User:
     """
     Activate a user account.
+
+    The transaction is intentionally not committed here.
     """
 
     user.is_active = True
-    user.updated_at = datetime.now(timezone.utc)
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
 
     return user
 
@@ -193,21 +208,24 @@ def deactivate_user(
     Deactivate a user account.
 
     Incrementing token_version invalidates existing JWT sessions.
+
+    The transaction is intentionally not committed here.
     """
 
     user.is_active = False
     user.token_version += 1
-    user.updated_at = datetime.now(timezone.utc)
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
 
     return user
 
 
 # ============================================================================
-# Password Management
+# PASSWORD MANAGEMENT
 # ============================================================================
 
 
@@ -237,29 +255,37 @@ def change_user_password(
     - Password is hashed with the central security service.
     - Existing JWT sessions are invalidated.
     - password_changed_at is updated.
+
+    Transaction behavior:
+    - Changes are flushed but NOT committed.
+    - The caller controls commit/rollback.
+
+    This is necessary so password-reset operations can atomically
+    update the password and consume the reset token together.
     """
 
-    user.password_hash = hash_password(new_password)
-
-    user.password_changed_at = datetime.now(
+    now = datetime.now(
         timezone.utc
     )
+
+    user.password_hash = hash_password(
+        new_password
+    )
+
+    user.password_changed_at = now
 
     user.token_version += 1
 
-    user.updated_at = datetime.now(
-        timezone.utc
-    )
+    user.updated_at = now
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
 
     return user
 
 
 # ============================================================================
-# Session Invalidation
+# SESSION INVALIDATION
 # ============================================================================
 
 
@@ -272,6 +298,8 @@ def invalidate_user_sessions(
 
     Incrementing token_version causes previously issued
     JWTs to become invalid.
+
+    The transaction is intentionally not committed here.
     """
 
     user.token_version += 1
@@ -280,7 +308,6 @@ def invalidate_user_sessions(
     )
 
     db.add(user)
-    db.commit()
-    db.refresh(user)
+    db.flush()
 
     return user
