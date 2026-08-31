@@ -172,8 +172,12 @@ def create_claim(
         title="New claim submitted",
         message=(
             f"Someone has submitted a claim for your found item "
-            f" \"{item.title}\"."
+            f"\"{item.title}\"."
         ),
+        entity_type="claim",
+        entity_id=claim.id,
+        
+
     )
 
     return claim
@@ -317,6 +321,8 @@ def withdraw_claim(
             f"A claim for your found item "
             f"\"{claim.item.title}\" has been withdrawn."
         ),
+        entity_type="claim",
+        entity_id=claim.id,
     )
 
     return updated_claim
@@ -406,6 +412,8 @@ def approve_claim(
             f"Your claim for \"{claim.item.title}\" "
             f"has been approved."
         ),
+        entity_type="claim",
+        entity_id=claim.id,
     )
 
     return updated_claim
@@ -481,6 +489,8 @@ def reject_claim(
             f"Your claim for \"{claim.item.title}\" "
             f"was rejected. Reason: {normalized_reason}"
         ),
+        entity_type="claim",
+        entity_id=claim.id,
     )
 
     return updated_claim

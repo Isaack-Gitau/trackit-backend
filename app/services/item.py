@@ -337,6 +337,8 @@ def approve_item(
             f"Your {item.type} item "
             f"\"{item.title}\" has been approved."
         ),
+        entity_type="item",
+        entity_id=item.id,
     )
 
     return updated_item
@@ -409,6 +411,9 @@ def reject_item(
             f"\"{item.title}\" was rejected. "
             f"Reason: {normalized_reason}"
         ),
+        entity_type="item",
+        entity_id=item.id,
+
     )
 
     return updated_item
