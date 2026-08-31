@@ -70,6 +70,79 @@ NOTIFICATION_CLAIM_WITHDRAWN = "claim_withdrawn"
 
 
 # ============================================================================
+# NOTIFICATION CATEGORIES
+# ============================================================================
+
+
+NOTIFICATION_CATEGORY_SYSTEM = "system"
+NOTIFICATION_CATEGORY_CLAIM = "claim"
+NOTIFICATION_CATEGORY_ITEM = "item"
+NOTIFICATION_CATEGORY_ACCOUNT = "account"
+NOTIFICATION_CATEGORY_SECURITY = "security"
+
+
+# ============================================================================
+# NOTIFICATION PRIORITIES
+# ============================================================================
+
+
+NOTIFICATION_PRIORITY_LOW = "low"
+NOTIFICATION_PRIORITY_NORMAL = "normal"
+NOTIFICATION_PRIORITY_HIGH = "high"
+NOTIFICATION_PRIORITY_URGENT = "urgent"
+
+
+VALID_NOTIFICATION_CATEGORIES = {
+    NOTIFICATION_CATEGORY_SYSTEM,
+    NOTIFICATION_CATEGORY_CLAIM,
+    NOTIFICATION_CATEGORY_ITEM,
+    NOTIFICATION_CATEGORY_ACCOUNT,
+    NOTIFICATION_CATEGORY_SECURITY,
+}
+
+
+VALID_NOTIFICATION_PRIORITIES = {
+    NOTIFICATION_PRIORITY_LOW,
+    NOTIFICATION_PRIORITY_NORMAL,
+    NOTIFICATION_PRIORITY_HIGH,
+    NOTIFICATION_PRIORITY_URGENT,
+}
+
+
+# ============================================================================
+# DEFAULT TYPE METADATA
+# ============================================================================
+
+
+_NOTIFICATION_TYPE_METADATA = {
+    NOTIFICATION_ITEM_APPROVED: (
+        NOTIFICATION_CATEGORY_ITEM,
+        NOTIFICATION_PRIORITY_HIGH,
+    ),
+    NOTIFICATION_ITEM_REJECTED: (
+        NOTIFICATION_CATEGORY_ITEM,
+        NOTIFICATION_PRIORITY_HIGH,
+    ),
+    NOTIFICATION_CLAIM_CREATED: (
+        NOTIFICATION_CATEGORY_CLAIM,
+        NOTIFICATION_PRIORITY_NORMAL,
+    ),
+    NOTIFICATION_CLAIM_APPROVED: (
+        NOTIFICATION_CATEGORY_CLAIM,
+        NOTIFICATION_PRIORITY_HIGH,
+    ),
+    NOTIFICATION_CLAIM_REJECTED: (
+        NOTIFICATION_CATEGORY_CLAIM,
+        NOTIFICATION_PRIORITY_HIGH,
+    ),
+    NOTIFICATION_CLAIM_WITHDRAWN: (
+        NOTIFICATION_CATEGORY_CLAIM,
+        NOTIFICATION_PRIORITY_NORMAL,
+    ),
+}
+
+
+# ============================================================================
 # CREATE
 # ============================================================================
 
@@ -81,15 +154,19 @@ def create_notification(
     notification_type: str,
     title: str,
     message: str,
+    category: str | None = None,
+    priority: str | None = None,
+    entity_type: str | None = None,
+    entity_id: int | None = None,
 ) -> Notification:
     """
     Create a notification for a user.
 
-    The notification starts unread.
+    Category and priority are automatically derived from the notification
+    type when they are not explicitly supplied.
 
-    Basic content validation is performed here because notification
-    creation is a service-level operation. Database persistence is
-    delegated to the repository.
+    This keeps existing notification callers backward-compatible while
+    allowing newer callers to provide explicit context.
     """
 
     normalized_type = notification_type.strip()
@@ -116,12 +193,80 @@ def create_notification(
             "Notification user ID must be a positive integer."
         )
 
+    if entity_id is not None and entity_id <= 0:
+        raise ValueError(
+            "Notification entity ID must be a positive integer."
+        )
+
+    metadata = _NOTIFICATION_TYPE_METADATA.get(
+        normalized_type,
+        (
+            NOTIFICATION_CATEGORY_SYSTEM,
+            NOTIFICATION_PRIORITY_NORMAL,
+        ),
+    )
+
+    resolved_category = (
+        category.strip()
+        if category is not None
+        else metadata[0]
+    )
+
+    resolved_priority = (
+        priority.strip()
+        if priority is not None
+        else metadata[1]
+    )
+
+    if not resolved_category:
+        raise ValueError(
+            "Notification category cannot be empty."
+        )
+
+    if resolved_category not in VALID_NOTIFICATION_CATEGORIES:
+        raise ValueError(
+            "Invalid notification category."
+        )
+
+    if not resolved_priority:
+        raise ValueError(
+            "Notification priority cannot be empty."
+        )
+
+    if resolved_priority not in VALID_NOTIFICATION_PRIORITIES:
+        raise ValueError(
+            "Invalid notification priority."
+        )
+
+    normalized_entity_type = (
+        entity_type.strip()
+        if entity_type is not None
+        else None
+    )
+
+    if normalized_entity_type == "":
+        normalized_entity_type = None
+
+    if normalized_entity_type is None and entity_id is not None:
+        raise ValueError(
+            "Notification entity type is required when entity ID is provided."
+        )
+
+    if normalized_entity_type is not None and entity_id is None:
+        raise ValueError(
+            "Notification entity ID is required when entity type is provided."
+        )
+
     return repository_create_notification(
         db,
         user_id=user_id,
         notification_type=normalized_type,
         title=normalized_title,
         message=normalized_message,
+        category=resolved_category,
+        priority=resolved_priority,
+        entity_type=normalized_entity_type,
+        entity_id=entity_id,
     )
 
 
@@ -139,13 +284,8 @@ def get_notification(
     """
     Retrieve a notification belonging to the requested user.
 
-    Ownership is enforced here rather than exposing the repository's
-    unrestricted primary-key lookup directly to callers.
-
-    Returns None when:
-
-    - the notification does not exist; or
-    - the notification belongs to another user.
+    Returns None when the notification does not exist or belongs
+    to another user.
     """
 
     if notification_id <= 0:

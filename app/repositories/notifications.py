@@ -1,4 +1,3 @@
-
 """
 TRACKIT Notification Repository.
 
@@ -40,6 +39,8 @@ This repository intentionally does NOT perform:
 Those responsibilities belong to the service and API layers.
 """
 
+from datetime import datetime, timezone
+
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
@@ -58,6 +59,10 @@ def create_notification(
     notification_type: str,
     title: str,
     message: str,
+    category: str = "system",
+    priority: str = "normal",
+    entity_type: str | None = None,
+    entity_id: int | None = None,
 ) -> Notification:
     """
     Create and persist a notification.
@@ -70,9 +75,14 @@ def create_notification(
     notification = Notification(
         user_id=user_id,
         type=notification_type,
+        category=category,
+        priority=priority,
+        entity_type=entity_type,
+        entity_id=entity_id,
         title=title,
         message=message,
         is_read=False,
+        read_at=None,
     )
 
     db.add(notification)
@@ -208,13 +218,18 @@ def mark_notification_as_read(
     """
     Mark a notification as read.
 
+    If the notification is already read, its original read_at timestamp
+    is preserved.
+
     Ownership and authorization must already have been verified
     by the service layer.
     """
 
-    notification.is_read = True
+    if not notification.is_read:
+        notification.is_read = True
+        notification.read_at = datetime.now(timezone.utc)
 
-    db.flush()
+        db.flush()
 
     return notification
 
@@ -234,10 +249,13 @@ def mark_all_notifications_as_read(
 
     Returns the number of notifications changed.
 
-    The user_id condition is intentionally part of the SQL UPDATE
-    statement so that notifications belonging to other users cannot
-    be modified by this operation.
+    Each notification receives the same operation timestamp.
+
+    Already-read notifications are not modified, preserving their
+    original read_at values.
     """
+
+    read_at = datetime.now(timezone.utc)
 
     statement = (
         update(Notification)
@@ -247,6 +265,7 @@ def mark_all_notifications_as_read(
         )
         .values(
             is_read=True,
+            read_at=read_at,
         )
     )
 

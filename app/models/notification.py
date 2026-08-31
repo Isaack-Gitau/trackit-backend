@@ -13,11 +13,21 @@ Security principles:
 - Notification content must never contain passwords, JWTs,
   authentication tokens, or other secrets.
 - Read state is controlled by the notification owner.
+- Notification context contains only non-sensitive application metadata.
 """
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, Text, func
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -34,16 +44,15 @@ class Notification(Base):
     __tablename__ = "notifications"
 
     # ========================================================================
-    # Primary Key
+    # PRIMARY KEY
     # ========================================================================
 
     id: Mapped[int] = mapped_column(
         primary_key=True,
-        index=True,
     )
 
     # ========================================================================
-    # Recipient
+    # RECIPIENT
     # ========================================================================
 
     user_id: Mapped[int] = mapped_column(
@@ -56,7 +65,7 @@ class Notification(Base):
     )
 
     # ========================================================================
-    # Notification Type
+    # NOTIFICATION TYPE
     # ========================================================================
 
     type: Mapped[str] = mapped_column(
@@ -66,7 +75,45 @@ class Notification(Base):
     )
 
     # ========================================================================
-    # Notification Content
+    # NOTIFICATION CATEGORY
+    # ========================================================================
+
+    category: Mapped[str] = mapped_column(
+        String(30),
+        nullable=False,
+        default="system",
+        server_default="system",
+        index=True,
+    )
+
+    # ========================================================================
+    # NOTIFICATION PRIORITY
+    # ========================================================================
+
+    priority: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        default="normal",
+        server_default="normal",
+        index=True,
+    )
+
+    # ========================================================================
+    # RELATED ENTITY
+    # ========================================================================
+
+    entity_type: Mapped[str | None] = mapped_column(
+        String(50),
+        nullable=True,
+    )
+
+    entity_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
+
+    # ========================================================================
+    # NOTIFICATION CONTENT
     # ========================================================================
 
     title: Mapped[str] = mapped_column(
@@ -80,7 +127,7 @@ class Notification(Base):
     )
 
     # ========================================================================
-    # Read State
+    # READ STATE
     # ========================================================================
 
     is_read: Mapped[bool] = mapped_column(
@@ -91,8 +138,14 @@ class Notification(Base):
         index=True,
     )
 
+    read_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
     # ========================================================================
-    # Timestamp
+    # TIMESTAMP
     # ========================================================================
 
     created_at: Mapped[datetime] = mapped_column(
@@ -103,7 +156,7 @@ class Notification(Base):
     )
 
     # ========================================================================
-    # Relationships
+    # RELATIONSHIPS
     # ========================================================================
 
     user = relationship(
@@ -112,7 +165,7 @@ class Notification(Base):
     )
 
     # ========================================================================
-    # Database Indexes
+    # DATABASE INDEXES
     # ========================================================================
 
     __table_args__ = (
@@ -121,5 +174,10 @@ class Notification(Base):
             "user_id",
             "is_read",
             "created_at",
+        ),
+        Index(
+            "ix_notifications_entity",
+            "entity_type",
+            "entity_id",
         ),
     )

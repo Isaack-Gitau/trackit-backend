@@ -8,7 +8,7 @@ Security principles:
 - user_id is never accepted from the client.
 - Notification ownership comes from the authenticated user.
 - Notification read state is controlled by API actions.
-- Notification responses expose only application-safe fields.
+- Notification context contains non-sensitive application metadata only.
 """
 
 from datetime import datetime
@@ -19,11 +19,12 @@ from pydantic import BaseModel, ConfigDict
 # ============================================================================
 # NOTIFICATION RESPONSE
 # ============================================================================
-
-
 class NotificationResponse(BaseModel):
     """
     API representation of a notification.
+
+    The response intentionally exposes only the public notification
+    contract required by the API.
     """
 
     model_config = ConfigDict(
@@ -32,9 +33,11 @@ class NotificationResponse(BaseModel):
 
     id: int
     user_id: int
+
     type: str
     title: str
     message: str
+
     is_read: bool
     created_at: datetime
 
@@ -46,7 +49,8 @@ class NotificationResponse(BaseModel):
 
 class NotificationUnreadCountResponse(BaseModel):
     """
-    Response containing the authenticated user's unread notification count.
+    Response containing the authenticated user's unread
+    notification count.
     """
 
     unread_count: int
@@ -68,7 +72,9 @@ class NotificationReadResponse(BaseModel):
 
     id: int
     user_id: int
+
     is_read: bool
+    read_at: datetime | None
 
 
 # ============================================================================
@@ -83,6 +89,8 @@ class NotificationDeleteSelectedRequest(BaseModel):
 
     The user_id is deliberately not accepted from the client.
     Ownership is determined by the authenticated user in the service layer.
+
+    An empty list is valid and results in zero notifications being deleted.
     """
 
     notification_ids: list[int]
