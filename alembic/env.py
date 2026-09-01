@@ -1,4 +1,3 @@
-
 """
 TRACKIT Alembic Environment Configuration.
 
@@ -50,6 +49,7 @@ from app.models import (
     AuditLog,
     Report,
     Notification,
+    Match,
 )
 
 

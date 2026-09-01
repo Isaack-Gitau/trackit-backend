@@ -12,6 +12,7 @@ from app.models.claim import Claim
 from app.models.audit_log import AuditLog
 from app.models.report import Report
 from app.models.notification import Notification
+from app.models.match import Match
 
 __all__ = [
     "User",
@@ -21,4 +22,5 @@ __all__ = [
     "Claim",
     "Report",
     "Notification",
+    "Match"
 ]

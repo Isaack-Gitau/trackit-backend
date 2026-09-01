@@ -14,6 +14,7 @@ Security principles:
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, String, func
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
@@ -206,3 +207,40 @@ class User(Base):
         passive_deletes=True,
     )
 
+        # ========================================================================
+    # PROFILE
+    # ========================================================================
+
+    profile_picture: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    phone_number: Mapped[str | None] = mapped_column(
+        String(30),
+        nullable=True,
+    )
+
+    bio: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
+    address: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    social_links: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default="{}",
+        nullable=False,
+    )
+
+    preferences: Mapped[dict] = mapped_column(
+        JSONB,
+        default=dict,
+        server_default="{}",
+        nullable=False,
+    )

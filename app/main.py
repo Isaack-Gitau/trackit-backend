@@ -32,6 +32,7 @@ from app.routers.items import router as items_router
 from app.routers.claims import router as claims_router
 from app.routers.reports import router as reports_router
 from app.routers.notifications import router as notifications_router
+from app.routers.profile import router as profile_router
 # ============================================================================
 # APPLICATION
 # ============================================================================
@@ -103,6 +104,15 @@ app.include_router(
 
 app.include_router(
     auth_router,
+)
+
+# ============================================================================
+# PROFILE API
+# ============================================================================
+
+app.include_router(
+    profile_router,
+    prefix="/api",
 )
 
 

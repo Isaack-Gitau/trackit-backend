@@ -1,3 +1,9 @@
+"""
+TRACKIT Item Database Model.
+
+Represents a lost or found item posted by a user.
+"""
+
 from datetime import datetime
 
 from sqlalchemy import DateTime, ForeignKey, String, Text, func
@@ -70,6 +76,10 @@ class Item(Base):
         nullable=False,
     )
 
+    # ========================================================================
+    # Relationships
+    # ========================================================================
+
     owner = relationship(
         "User",
         back_populates="items",
@@ -85,6 +95,22 @@ class Item(Base):
     reports = relationship(
         "Report",
         back_populates="item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    matches_as_lost = relationship(
+        "Match",
+        foreign_keys="Match.lost_item_id",
+        back_populates="lost_item",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
+
+    matches_as_found = relationship(
+        "Match",
+        foreign_keys="Match.found_item_id",
+        back_populates="found_item",
         cascade="all, delete-orphan",
         passive_deletes=True,
     )

@@ -1,12 +1,12 @@
 """
 TRACKIT User Service.
 
-Contains business logic related to user accounts.
+Contains business logic related to user accounts and profiles.
 
 Responsibilities:
 - Find users
 - Create users
-- Update account information
+- Update profile information
 - Activate/deactivate accounts
 - Verify email accounts
 - Change passwords
@@ -31,9 +31,12 @@ from app.models.user import User
 from app.repositories.users import (
     create_user,
     get_user_by_email,
+    get_user_by_email_excluding_id,
     get_user_by_id,
     get_user_by_login,
     get_user_by_username,
+    get_user_by_username_excluding_id,
+    update_user_profile,
 )
 
 
@@ -121,12 +124,18 @@ def create_user_account(
     username = username.strip().lower()
     email = email.strip().lower()
 
-    if get_user_by_username(db, username) is not None:
+    if get_user_by_username(
+        db,
+        username,
+    ) is not None:
         raise ValueError(
             "Username is already registered."
         )
 
-    if get_user_by_email(db, email) is not None:
+    if get_user_by_email(
+        db,
+        email,
+    ) is not None:
         raise ValueError(
             "Email is already registered."
         )
@@ -143,6 +152,157 @@ def create_user_account(
         email=email,
         password_hash=password_hash,
     )
+
+
+# ============================================================================
+# PROFILE MANAGEMENT
+# ============================================================================
+
+
+def update_user_profile_service(
+    db: Session,
+    user: User,
+    *,
+    username: str | None = None,
+    email: str | None = None,
+    first_name: str | None = None,
+    last_name: str | None = None,
+    profile_picture: str | None = None,
+    phone_number: str | None = None,
+    bio: str | None = None,
+    address: str | None = None,
+    social_links: dict[str, object] | None = None,
+    preferences: dict[str, object] | None = None,
+) -> User:
+    """
+    Update the authenticated user's profile.
+
+    Business rules:
+
+    - Username must be unique.
+    - Email must be unique.
+    - Username is normalized to lowercase.
+    - Email is normalized to lowercase.
+    - Changing the email address removes the existing
+      email verification status.
+    - The authenticated user's own username/email do not
+      trigger uniqueness conflicts.
+    - Profile fields are updated without changing the
+      user's authentication sessions.
+    - The transaction is flushed but NOT committed.
+
+    The request-level database dependency controls
+    commit and rollback behavior.
+    """
+
+    # ========================================================================
+    # NORMALIZE USERNAME
+    # ========================================================================
+
+    normalized_username = None
+
+    if username is not None:
+        normalized_username = (
+            username.strip().lower()
+        )
+
+    # ========================================================================
+    # NORMALIZE EMAIL
+    # ========================================================================
+
+    normalized_email = None
+
+    if email is not None:
+        normalized_email = (
+            email.strip().lower()
+        )
+
+    # ========================================================================
+    # USERNAME UNIQUENESS
+    # ========================================================================
+
+    if normalized_username is not None:
+        existing_username_user = (
+            get_user_by_username_excluding_id(
+                db,
+                normalized_username,
+                user.id,
+            )
+        )
+
+        if existing_username_user is not None:
+            raise ValueError(
+                "Username is already registered."
+            )
+
+    # ========================================================================
+    # EMAIL UNIQUENESS
+    # ========================================================================
+
+    if normalized_email is not None:
+        existing_email_user = (
+            get_user_by_email_excluding_id(
+                db,
+                normalized_email,
+                user.id,
+            )
+        )
+
+        if existing_email_user is not None:
+            raise ValueError(
+                "Email is already registered."
+            )
+
+    # ========================================================================
+    # DETECT EMAIL CHANGE
+    # ========================================================================
+
+    email_changed = (
+        normalized_email is not None
+        and normalized_email != user.email
+    )
+
+    # ========================================================================
+    # APPLY PROFILE CHANGES
+    # ========================================================================
+
+    update_user_profile(
+        db,
+        user,
+        username=normalized_username,
+        email=normalized_email,
+        first_name=first_name,
+        last_name=last_name,
+        profile_picture=profile_picture,
+        phone_number=phone_number,
+        bio=bio,
+        address=address,
+        social_links=social_links,
+        preferences=preferences,
+    )
+
+    # ========================================================================
+    # EMAIL VERIFICATION
+    #
+    # A new email address must be verified.
+    # ========================================================================
+
+    if email_changed:
+        user.is_verified = False
+
+    # ========================================================================
+    # UPDATED TIMESTAMP
+    # ========================================================================
+
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
 
 
 # ============================================================================
