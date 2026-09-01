@@ -94,6 +94,37 @@ def get_items_by_user(
 
 
 # ============================================================================
+# READ — APPROVED ITEMS FOR MATCHING
+# ============================================================================
+
+
+def get_approved_items_by_type(
+    db: Session,
+    *,
+    item_type: str,
+) -> list[Item]:
+    """
+    Retrieve all approved items of a specific type.
+
+    This query is intended for the matching workflow.
+
+    Matching must consider all approved candidates rather than
+    using the paginated public item query.
+    """
+
+    statement = (
+        select(Item)
+        .where(
+            Item.type == item_type,
+            Item.status == "approved",
+        )
+        .order_by(Item.created_at.desc())
+    )
+
+    return list(db.scalars(statement).all())
+
+
+# ============================================================================
 # SEARCH / FILTER / PAGINATION
 # ============================================================================
 

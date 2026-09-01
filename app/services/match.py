@@ -23,6 +23,7 @@ Responsibilities:
 - create new matches when the score reaches the possible threshold
 - update existing matches when item information changes
 - preserve dismissed state during recalculation
+- generate matches for newly approved items
 - enforce ownership for user-scoped match access
 
 This service intentionally does NOT:
@@ -41,6 +42,9 @@ from sqlalchemy.orm import Session
 
 from app.models.item import Item
 from app.models.match import Match
+from app.repositories.items import (
+    get_approved_items_by_type,
+)
 from app.repositories.matches import (
     create_match as repository_create_match,
     get_match_by_id as repository_get_match_by_id,
@@ -68,16 +72,11 @@ def _validate_items_for_matching(
     second_item: Item,
 ) -> tuple[Item, Item]:
     """
-    Validate two items and return them in LOST/FOUND order.
+    Validate and normalize a pair of items.
 
     Returns:
-
-        (lost_item, found_item)
-
-    Raises:
-        ValueError:
-            When either item has an invalid type or both items have
-            the same type.
+        tuple[Item, Item]:
+            (lost_item, found_item)
     """
 
     valid_types = {"lost", "found"}
@@ -108,10 +107,7 @@ def _validate_item_ids(
     found_item: Item,
 ) -> None:
     """
-    Ensure both items have database identifiers.
-
-    Match records require persisted Item IDs. The service therefore
-    rejects transient Item instances before attempting persistence.
+    Ensure both items have already been persisted.
     """
 
     if lost_item.id is None:
@@ -135,12 +131,10 @@ def calculate_item_match(
     second_item: Item,
 ) -> MatchResult:
     """
-    Calculate a deterministic match between two items.
+    Calculate a deterministic match result for two items.
 
-    This is the service-layer entry point for matching calculation.
-
-    The underlying scoring implementation remains in matching.py.
-    No database changes are performed.
+    Item order does not matter. The service normalizes the pair
+    into LOST and FOUND before delegating to the matching engine.
     """
 
     lost_item, found_item = _validate_items_for_matching(
@@ -155,7 +149,7 @@ def calculate_item_match(
 
 
 # ============================================================================
-# CREATE / UPDATE
+# CREATE / UPDATE SINGLE MATCH
 # ============================================================================
 
 
@@ -165,29 +159,15 @@ def save_match(
     second_item: Item,
 ) -> Match | None:
     """
-    Calculate and persist a match for two LOST/FOUND items.
+    Calculate and persist a match between two LOST/FOUND items.
 
     Behavior:
 
-    - score < 60:
-        - do not create a new match
-        - if a match already exists, update its scoring information
-
-    - score >= 60:
-        - create a new match if none exists
-        - otherwise update the existing match
-
-    Existing dismissed state is preserved during recalculation.
-
-    Returns:
-
-        Match instance when a persisted match exists.
-        None when the pair scores below the possible threshold and
-        no previous match exists.
-
-    Raises:
-        ValueError:
-            When the items cannot be matched or are not persisted.
+    - New matches are only persisted when score >= 60.
+    - Existing matches are recalculated and updated regardless
+      of whether their new score is below 60.
+    - Existing dismissed state is preserved because this function
+      does not modify is_dismissed.
     """
 
     lost_item, found_item = _validate_items_for_matching(
@@ -249,10 +229,7 @@ def create_or_update_match(
     second_item: Item,
 ) -> Match | None:
     """
-    Backward-friendly alias for save_match().
-
-    The explicit name makes the intended orchestration behavior clear
-    to callers that do not need to distinguish creation from updating.
+    Backwards-compatible application-level alias for save_match().
     """
 
     return save_match(
@@ -260,6 +237,79 @@ def create_or_update_match(
         first_item,
         second_item,
     )
+
+
+# ============================================================================
+# GENERATE MATCHES FOR APPROVED ITEM
+# ============================================================================
+
+
+def generate_matches_for_item(
+    db: Session,
+    *,
+    item: Item,
+) -> list[Match]:
+    """
+    Generate potential matches for an approved item.
+
+    The item must already be approved.
+
+    Matching direction:
+
+        APPROVED LOST
+            ↓
+        approved FOUND candidates
+
+        APPROVED FOUND
+            ↓
+        approved LOST candidates
+
+    Only candidates that reach the possible-match threshold are
+    returned as persisted Match records.
+
+    Existing matches are recalculated through save_match().
+    """
+
+    if item.id is None:
+        raise ValueError(
+            "The item must be persisted before generating matches."
+        )
+
+    if item.status != "approved":
+        raise ValueError(
+            "Only approved items can generate matches."
+        )
+
+    if item.type == "lost":
+        opposite_type = "found"
+    elif item.type == "found":
+        opposite_type = "lost"
+    else:
+        raise ValueError(
+            "Item type must be 'lost' or 'found'."
+        )
+
+    candidate_items = get_approved_items_by_type(
+        db,
+        item_type=opposite_type,
+    )
+
+    matches: list[Match] = []
+
+    for candidate in candidate_items:
+        if candidate.id == item.id:
+            continue
+
+        match = save_match(
+            db,
+            item,
+            candidate,
+        )
+
+        if match is not None:
+            matches.append(match)
+
+    return matches
 
 
 # ============================================================================
@@ -274,10 +324,6 @@ def get_match(
 ) -> Match | None:
     """
     Retrieve a match by ID.
-
-    Authorization is intentionally not performed here because this
-    repository-style lookup is useful to higher-level workflows that
-    may apply different authorization rules.
     """
 
     return repository_get_match_by_id(
@@ -293,15 +339,11 @@ def get_user_match(
     user_id: int,
 ) -> Match | None:
     """
-    Retrieve a match only when the user owns either participating item.
+    Retrieve a match only when the authenticated user owns
+    either participating item.
 
-    Returns None when:
-
-    - the match does not exist
-    - the user owns neither the LOST nor FOUND item
-
-    This creates the service-level authorization boundary for
-    user-scoped match access.
+    Returns None for inaccessible matches so callers can expose
+    them as HTTP 404 without revealing another user's data.
     """
 
     match = repository_get_match_by_id(
@@ -322,7 +364,7 @@ def get_user_match(
 
 
 # ============================================================================
-# READ — ITEM MATCHES
+# READ — LOST ITEM MATCHES
 # ============================================================================
 
 
@@ -334,7 +376,7 @@ def get_lost_item_matches(
     include_dismissed: bool = False,
 ) -> list[Match]:
     """
-    Retrieve matches for a LOST item when the requesting user owns it.
+    Retrieve matches for an owned LOST item.
     """
 
     if lost_item.user_id != user_id:
@@ -354,6 +396,11 @@ def get_lost_item_matches(
     )
 
 
+# ============================================================================
+# READ — FOUND ITEM MATCHES
+# ============================================================================
+
+
 def get_found_item_matches(
     db: Session,
     *,
@@ -362,7 +409,7 @@ def get_found_item_matches(
     include_dismissed: bool = False,
 ) -> list[Match]:
     """
-    Retrieve matches for a FOUND item when the requesting user owns it.
+    Retrieve matches for an owned FOUND item.
     """
 
     if found_item.user_id != user_id:
@@ -394,9 +441,7 @@ def list_user_matches(
     include_dismissed: bool = False,
 ) -> list[Match]:
     """
-    Retrieve all matches involving items owned by the user.
-
-    The repository performs the ownership filtering at the SQL level.
+    Retrieve matches involving the authenticated user's items.
     """
 
     return repository_get_matches_by_user_items(
@@ -407,7 +452,7 @@ def list_user_matches(
 
 
 # ============================================================================
-# DISMISS / RESTORE
+# DISMISS
 # ============================================================================
 
 
@@ -418,9 +463,7 @@ def dismiss_match(
     user_id: int,
 ) -> Match:
     """
-    Dismiss a match.
-
-    Only a user who owns either participating item may dismiss it.
+    Dismiss a match when the user owns either participating item.
     """
 
     _require_match_ownership(
@@ -435,6 +478,11 @@ def dismiss_match(
     )
 
 
+# ============================================================================
+# RESTORE
+# ============================================================================
+
+
 def restore_match(
     db: Session,
     *,
@@ -442,9 +490,8 @@ def restore_match(
     user_id: int,
 ) -> Match:
     """
-    Restore a previously dismissed match.
-
-    Only a user who owns either participating item may restore it.
+    Restore a dismissed match when the user owns either
+    participating item.
     """
 
     _require_match_ownership(
@@ -460,7 +507,7 @@ def restore_match(
 
 
 # ============================================================================
-# INTERNAL AUTHORIZATION
+# OWNERSHIP
 # ============================================================================
 
 
@@ -470,7 +517,7 @@ def _require_match_ownership(
     user_id: int,
 ) -> None:
     """
-    Require ownership of at least one item participating in the match.
+    Require the user to own either item participating in the match.
     """
 
     if match.lost_item.user_id == user_id:
@@ -482,4 +529,3 @@ def _require_match_ownership(
     raise PermissionError(
         "You are not authorized to modify this match."
     )
-

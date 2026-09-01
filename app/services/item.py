@@ -1,4 +1,3 @@
-
 """
 TRACKIT Item Service.
 
@@ -28,6 +27,8 @@ Security principles:
 - Rejection requires a reason.
 - Administrator actions are audited.
 - Item moderation events generate user notifications.
+- Matching is generated only after an item is approved.
+- Matching does not automatically create claims.
 """
 
 from sqlalchemy.orm import Session
@@ -47,6 +48,10 @@ from app.repositories.items import (
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
+)
+
+from app.services.match import (
+    generate_matches_for_item,
 )
 
 from app.services.notification import (
@@ -301,8 +306,12 @@ def approve_item(
 
     - Only pending items may be approved.
     - Reviewer identity comes from the authenticated administrator.
+    - Approval changes the item status to approved.
+    - Approved items trigger matching against approved opposite-type items.
     - The approval action is audited.
     - The item owner receives an approval notification.
+
+    Matching does not create claims.
     """
 
     if item.status != ITEM_STATUS_PENDING:
@@ -314,6 +323,15 @@ def approve_item(
         db,
         item,
         status=ITEM_STATUS_APPROVED,
+    )
+
+    # Generate potential matches only after the item becomes approved.
+    #
+    # This searches all approved items of the opposite type and persists
+    # qualifying matches through the matching service.
+    generate_matches_for_item(
+        db,
+        item=updated_item,
     )
 
     create_audit_log(
@@ -413,7 +431,6 @@ def reject_item(
         ),
         entity_type="item",
         entity_id=item.id,
-
     )
 
     return updated_item

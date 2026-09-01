@@ -1059,3 +1059,340 @@ def test_create_or_update_match_alias(db):
     assert match is not None
     assert match.id is not None
 
+# ============================================================================
+# MATCH GENERATION FOR APPROVED ITEMS
+# ============================================================================
+
+
+def test_generate_matches_for_approved_lost_item(db):
+    """
+    An approved LOST item should generate matches against approved
+    FOUND items that reach the possible-match threshold.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    matches = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].lost_item_id == lost_item.id
+    assert matches[0].found_item_id == found_item.id
+    assert matches[0].score >= 60
+
+
+def test_generate_matches_for_approved_found_item(db):
+    """
+    An approved FOUND item should generate matches against approved
+    LOST items.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    matches = generate_matches_for_item(
+        db,
+        item=found_item,
+    )
+
+    assert len(matches) == 1
+    assert matches[0].lost_item_id == lost_item.id
+    assert matches[0].found_item_id == found_item.id
+    assert matches[0].score >= 60
+
+
+def test_generate_matches_ignores_weak_candidates(db):
+    """
+    Candidates below the possible-match threshold should not be persisted.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Laptop",
+        description="A black laptop.",
+        category="Electronics",
+        location="Main Library",
+        created_at=datetime.now(timezone.utc) - timedelta(days=365),
+    )
+
+    weak_found_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Bicycle",
+        description="A red bicycle.",
+        category="Sports",
+        location="City Stadium",
+        created_at=datetime.now(timezone.utc),
+    )
+
+    matches = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert matches == []
+
+    assert weak_found_item.id is not None
+
+    stored_matches = db.query(Match).all()
+    assert stored_matches == []
+
+
+def test_generate_matches_considers_only_approved_candidates(db):
+    """
+    Pending candidates must not generate persisted matches.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    pending_found_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    pending_found_item.status = "pending"
+    db.flush()
+
+    matches = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert matches == []
+
+    assert pending_found_item.status == "pending"
+    assert db.query(Match).all() == []
+
+
+def test_generate_matches_ignores_same_type_candidates(db):
+    """
+    Matching should only compare LOST items with FOUND items and vice versa.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    another_lost_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    matches = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert matches == []
+
+    assert another_lost_item.id is not None
+    assert db.query(Match).all() == []
+
+
+def test_generate_matches_handles_multiple_candidates(db):
+    """
+    Multiple qualifying opposite-type candidates should produce
+    multiple persisted matches.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    found_one = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    found_two = create_test_item(
+        db,
+        user_id=3,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    matches = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert len(matches) == 2
+
+    match_ids = {match.id for match in matches}
+
+    assert len(match_ids) == 2
+
+    pair_ids = {
+        (match.lost_item_id, match.found_item_id)
+        for match in matches
+    }
+
+    assert pair_ids == {
+        (lost_item.id, found_one.id),
+        (lost_item.id, found_two.id),
+    }
+
+
+def test_generate_matches_is_idempotent(db):
+    """
+    Running match generation repeatedly must not create duplicate
+    Match records for the same LOST/FOUND pairs.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        item_type="found",
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    first_results = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    second_results = generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    assert len(first_results) == 1
+    assert len(second_results) == 1
+
+    assert second_results[0].id == first_results[0].id
+
+    stored_matches = db.query(Match).all()
+
+    assert len(stored_matches) == 1
+
+
+def test_generate_matches_rejects_pending_item(db):
+    """
+    Pending items must not generate matches.
+    """
+
+    from app.services.match import generate_matches_for_item
+
+    pending_item = create_test_item(
+        db,
+        user_id=1,
+        item_type="lost",
+        title="Black Dell Laptop",
+    )
+
+    pending_item.status = "pending"
+    db.flush()
+
+    with pytest.raises(
+        ValueError,
+        match="Only approved items can generate matches",
+    ):
+        generate_matches_for_item(
+            db,
+            item=pending_item,
+        )

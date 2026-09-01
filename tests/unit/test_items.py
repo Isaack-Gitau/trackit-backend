@@ -1016,3 +1016,352 @@ def test_rejection_requires_reason(db):
             reviewer_id=99,
             rejection_reason="   ",
         )
+# ============================================================================
+# APPROVAL → MATCHING
+# ============================================================================
+
+
+def test_approving_lost_item_generates_match(db, admin_user):
+    """
+    Approving a LOST item should generate a match against an
+    already-approved FOUND item when the score qualifies.
+    """
+
+    from app.models.match import Match
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    found_item.status = "approved"
+    db.flush()
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    assert lost_item.status == "pending"
+
+    approved = approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert approved.status == "approved"
+
+    matches = db.query(Match).all()
+
+    assert len(matches) == 1
+    assert matches[0].lost_item_id == lost_item.id
+    assert matches[0].found_item_id == found_item.id
+    assert matches[0].score >= 60
+
+
+def test_approving_found_item_generates_match(db, admin_user):
+    """
+    Approving a FOUND item should generate a match against an
+    already-approved LOST item when the score qualifies.
+    """
+
+    from app.models.match import Match
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    lost_item.status = "approved"
+    db.flush()
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    assert found_item.status == "pending"
+
+    approved = approve_item(
+        db,
+        item=found_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert approved.status == "approved"
+
+    matches = db.query(Match).all()
+
+    assert len(matches) == 1
+    assert matches[0].lost_item_id == lost_item.id
+    assert matches[0].found_item_id == found_item.id
+    assert matches[0].score >= 60
+
+
+def test_approving_item_ignores_pending_opposite_item(db, admin_user):
+    """
+    An approved item must not be matched against an opposite-type
+    item that is still pending.
+    """
+
+    from app.models.match import Match
+
+    pending_found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert lost_item.status == "approved"
+    assert pending_found_item.status == "pending"
+
+    assert db.query(Match).all() == []
+
+
+def test_approving_item_ignores_rejected_opposite_item(db, admin_user):
+    """
+    An approved item must not be matched against a rejected
+    opposite-type item.
+    """
+
+    from app.models.match import Match
+
+    rejected_found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    reject_item(
+        db,
+        item=rejected_found_item,
+        reviewer_id=admin_user.id,
+        rejection_reason="Test rejection.",
+    )
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert lost_item.status == "approved"
+    assert rejected_found_item.status == "rejected"
+
+    assert db.query(Match).all() == []
+
+
+def test_approving_item_does_not_create_weak_match(db, admin_user):
+    """
+    Approval must not create a match when the candidate score
+    is below the possible-match threshold.
+    """
+
+    from app.models.match import Match
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Red Bicycle",
+        description="Red mountain bicycle.",
+        item_type="found",
+        category="Sports",
+        location="City Stadium",
+    )
+
+    found_item.status = "approved"
+    db.flush()
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Laptop",
+        description="Black laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Main Library",
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert lost_item.status == "approved"
+    assert db.query(Match).all() == []
+
+
+def test_approving_item_does_not_duplicate_existing_match(
+    db,
+    admin_user,
+):
+    """
+    Approval-driven matching must not create duplicate records
+    when the same matching workflow is triggered again.
+    """
+
+    from app.models.match import Match
+    from app.services.match import generate_matches_for_item
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    found_item.status = "approved"
+    db.flush()
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    first_matches = db.query(Match).all()
+
+    assert len(first_matches) == 1
+
+    generate_matches_for_item(
+        db,
+        item=lost_item,
+    )
+
+    second_matches = db.query(Match).all()
+
+    assert len(second_matches) == 1
+    assert second_matches[0].id == first_matches[0].id
+
+
+def test_approving_item_still_creates_approval_notification(
+    db,
+    admin_user,
+):
+    """
+    Integrating matching must not remove the existing approval
+    notification behavior.
+    """
+
+    from app.models.notification import Notification
+
+    item = create_test_item(
+        db,
+        user_id=10,
+        title="Approval Test Laptop",
+    )
+
+    approve_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+    )
+
+    notifications = db.query(Notification).filter(
+        Notification.user_id == item.user_id,
+    ).all()
+
+    assert len(notifications) == 1
+    assert notifications[0].type == "item_approved"
+
+
+def test_approving_item_still_creates_audit_log(
+    db,
+    admin_user,
+):
+    """
+    Integrating matching must not remove the existing approval
+    audit behavior.
+    """
+
+    from app.models.audit_log import AuditLog
+
+    item = create_test_item(
+        db,
+        user_id=10,
+        title="Audit Test Laptop",
+    )
+
+    approve_item(
+        db,
+        item=item,
+        reviewer_id=admin_user.id,
+    )
+
+    logs = db.query(AuditLog).filter(
+        AuditLog.user_id == admin_user.id,
+    ).all()
+
+    assert any(
+        f"Item {item.id} approved by administrator." in log.description
+        for log in logs
+    )
