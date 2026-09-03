@@ -15,6 +15,10 @@ Coverage:
 - ownership authorization
 - updating
 - deleting
+- item moderation
+- approval-triggered matching
+- approval-triggered match notifications
+- prevention of automatic claim creation
 
 Architecture under test:
 
@@ -27,6 +31,10 @@ Architecture under test:
 
 import pytest
 
+from app.models.claim import Claim
+from app.models.item import Item
+from app.models.match import Match
+from app.models.notification import Notification
 from app.models.user import User
 from app.services.item import (
     approve_item,
@@ -37,6 +45,10 @@ from app.services.item import (
     list_user_items,
     reject_item,
     update_item,
+)
+from app.services.notification import (
+    NOTIFICATION_ITEM_APPROVED,
+    NOTIFICATION_MATCH_FOUND,
 )
 
 
@@ -113,6 +125,46 @@ def create_test_item(
         category=category,
         location=location,
         image=image,
+    )
+
+
+def approve_test_item_directly(
+    db,
+    *,
+    item: Item,
+) -> Item:
+    """
+    Mark an item approved directly for test setup.
+
+    This is intentionally different from approve_item().
+
+    It allows integration tests to prepare an already-approved
+    opposite-type candidate without triggering the workflow under test.
+    """
+
+    item.status = "approved"
+    db.flush()
+
+    return item
+
+
+def get_match_notifications_for_match(
+    db,
+    *,
+    match_id: int,
+) -> list[Notification]:
+    """
+    Return persisted match-found notifications for a specific Match.
+    """
+
+    return (
+        db.query(Notification)
+        .filter(
+            Notification.type == NOTIFICATION_MATCH_FOUND,
+            Notification.entity_type == "match",
+            Notification.entity_id == match_id,
+        )
+        .all()
     )
 
 
@@ -859,7 +911,8 @@ def test_update_preserves_unspecified_fields(db):
     assert updated.category == "Electronics"
     assert updated.location == "Library"
 
-    # ============================================================================
+
+# ============================================================================
 # MODERATION
 # ============================================================================
 
@@ -898,6 +951,10 @@ def test_admin_can_reject_pending_item(db, admin_user):
 
     assert rejected.status == "rejected"
 
+
+# ============================================================================
+# RESTORED MODERATION AND MATCHING REGRESSION TESTS
+# ============================================================================
 
 def test_cannot_approve_already_approved_item(db, admin_user):
     """
@@ -1016,9 +1073,6 @@ def test_rejection_requires_reason(db):
             reviewer_id=99,
             rejection_reason="   ",
         )
-# ============================================================================
-# APPROVAL → MATCHING
-# ============================================================================
 
 
 def test_approving_lost_item_generates_match(db, admin_user):
@@ -1365,3 +1419,311 @@ def test_approving_item_still_creates_audit_log(
         f"Item {item.id} approved by administrator." in log.description
         for log in logs
     )
+
+# ============================================================================
+# APPROVAL → MATCHING → NOTIFICATIONS
+# ============================================================================
+
+
+def test_approving_lost_item_generates_match_and_notifies_both_users(
+    db,
+    admin_user,
+):
+    """
+    Approving a LOST item should generate a qualifying match against
+    an already-approved FOUND item and notify both participating users.
+    """
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=found_item,
+    )
+
+    approved_lost_item = approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert approved_lost_item.status == "approved"
+
+    matches = (
+        db.query(Match)
+        .filter(
+            Match.lost_item_id == lost_item.id,
+            Match.found_item_id == found_item.id,
+        )
+        .all()
+    )
+
+    assert len(matches) == 1
+
+    match = matches[0]
+
+    assert match.score >= 60
+    assert match.match_level in {"possible", "strong"}
+
+    notifications = get_match_notifications_for_match(
+        db,
+        match_id=match.id,
+    )
+
+    assert len(notifications) == 2
+
+    recipient_ids = {
+        notification.user_id
+        for notification in notifications
+    }
+
+    assert recipient_ids == {1, 2}
+
+
+def test_approving_found_item_generates_match_and_notifies_both_users(
+    db,
+    admin_user,
+):
+    """
+    Approving a FOUND item should generate a qualifying match against
+    an already-approved LOST item and notify both participating users.
+    """
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=lost_item,
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    approved_found_item = approve_item(
+        db,
+        item=found_item,
+        reviewer_id=admin_user.id,
+    )
+
+    assert approved_found_item.status == "approved"
+
+    matches = (
+        db.query(Match)
+        .filter(
+            Match.lost_item_id == lost_item.id,
+            Match.found_item_id == found_item.id,
+        )
+        .all()
+    )
+
+    assert len(matches) == 1
+
+    match = matches[0]
+
+    assert match.score >= 60
+    assert match.match_level in {"possible", "strong"}
+
+    notifications = get_match_notifications_for_match(
+        db,
+        match_id=match.id,
+    )
+
+    assert len(notifications) == 2
+
+    recipient_ids = {
+        notification.user_id
+        for notification in notifications
+    }
+
+    assert recipient_ids == {1, 2}
+
+
+def test_approving_item_does_not_notify_for_non_matching_item(
+    db,
+    admin_user,
+):
+    """
+    An approved item should not generate a match notification when
+    the available opposite-type item scores below the possible threshold.
+    """
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Red Bicycle",
+        description="Red mountain bicycle with basket.",
+        item_type="lost",
+        category="Sports",
+        location="North Campus",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Blue Wallet",
+        description="Small leather wallet found downtown.",
+        item_type="found",
+        category="Personal Items",
+        location="South Gate",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=found_item,
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    match_notifications = (
+        db.query(Notification)
+        .filter(
+            Notification.type == NOTIFICATION_MATCH_FOUND,
+        )
+        .all()
+    )
+
+    assert match_notifications == []
+
+
+def test_approving_item_with_same_user_match_creates_one_notification(
+    db,
+    admin_user,
+):
+    """
+    If the LOST and FOUND items belong to the same user, matching should
+    still occur but only one match notification should be created.
+    """
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=found_item,
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    matches = (
+        db.query(Match)
+        .filter(
+            Match.lost_item_id == lost_item.id,
+            Match.found_item_id == found_item.id,
+        )
+        .all()
+    )
+
+    assert len(matches) == 1
+
+    match_notifications = get_match_notifications_for_match(
+        db,
+        match_id=matches[0].id,
+    )
+
+    assert len(match_notifications) == 1
+    assert match_notifications[0].user_id == 1
+
+
+def test_approving_item_does_not_create_claim(
+    db,
+    admin_user,
+):
+    """
+    Matching is informational only.
+
+    Approving an item and generating a potential match must never
+    automatically create a claim.
+    """
+
+    lost_item = create_test_item(
+        db,
+        user_id=1,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="lost",
+        category="Electronics",
+        location="Library",
+    )
+
+    found_item = create_test_item(
+        db,
+        user_id=2,
+        title="Black Dell Laptop",
+        description="Black Dell laptop with silver logo.",
+        item_type="found",
+        category="Electronics",
+        location="Library",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=found_item,
+    )
+
+    approve_item(
+        db,
+        item=lost_item,
+        reviewer_id=admin_user.id,
+    )
+
+    claims = db.query(Claim).all()
+
+    assert claims == []

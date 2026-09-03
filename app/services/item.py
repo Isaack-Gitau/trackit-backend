@@ -28,6 +28,7 @@ Security principles:
 - Administrator actions are audited.
 - Item moderation events generate user notifications.
 - Matching is generated only after an item is approved.
+- Qualifying matches generate notifications for the involved users.
 - Matching does not automatically create claims.
 """
 
@@ -58,6 +59,7 @@ from app.services.notification import (
     NOTIFICATION_ITEM_APPROVED,
     NOTIFICATION_ITEM_REJECTED,
     create_notification,
+    notify_match_found,
 )
 
 
@@ -308,6 +310,7 @@ def approve_item(
     - Reviewer identity comes from the authenticated administrator.
     - Approval changes the item status to approved.
     - Approved items trigger matching against approved opposite-type items.
+    - Qualifying matches generate notifications for the involved users.
     - The approval action is audited.
     - The item owner receives an approval notification.
 
@@ -329,10 +332,25 @@ def approve_item(
     #
     # This searches all approved items of the opposite type and persists
     # qualifying matches through the matching service.
-    generate_matches_for_item(
+    matches = generate_matches_for_item(
         db,
         item=updated_item,
     )
+
+    # Notify the owners of each qualifying potential match.
+    #
+    # notify_match_found() handles:
+    # - the possible-match threshold
+    # - notifying both participating owners
+    # - same-user deduplication
+    # - per-user/match notification deduplication
+    #
+    # No claim is created automatically.
+    for match in matches:
+        notify_match_found(
+            db,
+            match=match,
+        )
 
     create_audit_log(
         db,

@@ -19,6 +19,7 @@ Architecture:
 Responsibilities:
 
 - Create notifications for users.
+- Create match notifications for item owners.
 - Retrieve a user's notifications.
 - Retrieve unread notifications.
 - Count unread notifications.
@@ -35,11 +36,13 @@ Security principles:
 - Notification content must never contain passwords, JWTs,
   authentication tokens, or other secrets.
 - Authorization decisions remain at the service/router boundary.
-- Database operations are delegated to the repository layer.
+- Match notifications are generated only from persisted Match records.
+- Match notifications are deduplicated per user and match.
 """
 
 from sqlalchemy.orm import Session
 
+from app.models.match import Match
 from app.models.notification import Notification
 from app.repositories.notifications import (
     count_unread_notifications as repository_count_unread_notifications,
@@ -48,6 +51,7 @@ from app.repositories.notifications import (
     delete_notification as repository_delete_notification,
     delete_selected_notifications as repository_delete_selected_notifications,
     get_notification_by_id,
+    get_notification_by_user_and_entity,
     get_notifications_by_user,
     get_unread_notifications_by_user,
     mark_all_notifications_as_read as repository_mark_all_notifications_as_read,
@@ -68,6 +72,8 @@ NOTIFICATION_CLAIM_APPROVED = "claim_approved"
 NOTIFICATION_CLAIM_REJECTED = "claim_rejected"
 NOTIFICATION_CLAIM_WITHDRAWN = "claim_withdrawn"
 
+NOTIFICATION_MATCH_FOUND = "match_found"
+
 
 # ============================================================================
 # NOTIFICATION CATEGORIES
@@ -79,6 +85,7 @@ NOTIFICATION_CATEGORY_CLAIM = "claim"
 NOTIFICATION_CATEGORY_ITEM = "item"
 NOTIFICATION_CATEGORY_ACCOUNT = "account"
 NOTIFICATION_CATEGORY_SECURITY = "security"
+NOTIFICATION_CATEGORY_MATCH = "match"
 
 
 # ============================================================================
@@ -98,6 +105,7 @@ VALID_NOTIFICATION_CATEGORIES = {
     NOTIFICATION_CATEGORY_ITEM,
     NOTIFICATION_CATEGORY_ACCOUNT,
     NOTIFICATION_CATEGORY_SECURITY,
+    NOTIFICATION_CATEGORY_MATCH,
 }
 
 
@@ -139,7 +147,100 @@ _NOTIFICATION_TYPE_METADATA = {
         NOTIFICATION_CATEGORY_CLAIM,
         NOTIFICATION_PRIORITY_NORMAL,
     ),
+    NOTIFICATION_MATCH_FOUND: (
+        NOTIFICATION_CATEGORY_MATCH,
+        NOTIFICATION_PRIORITY_HIGH,
+    ),
 }
+
+
+# ============================================================================
+# MATCH NOTIFICATION
+# ============================================================================
+
+
+def notify_match_found(
+    db: Session,
+    *,
+    match: Match,
+) -> list[Notification]:
+    """
+    Notify the owners of the items involved in a potential match.
+
+    Business rules:
+
+    - Only matches at or above the possible-match threshold are notified.
+    - The LOST item owner receives a notification.
+    - The FOUND item owner receives a notification.
+    - If both items belong to the same user, only one notification is sent.
+    - A notification is created only once for each user/match combination.
+    - Re-running this function is therefore safe and idempotent.
+
+    Returns:
+
+    - A list containing newly created notifications.
+    - An empty list when the match should not generate a notification
+      or when all applicable notifications already exist.
+
+    This function does not create claims and does not modify the Match.
+    """
+
+    if match.id is None:
+        raise ValueError(
+            "The match must be persisted before sending a notification."
+        )
+
+    if match.score < 60:
+        return []
+
+    lost_item = match.lost_item
+    found_item = match.found_item
+
+    if lost_item is None or found_item is None:
+        raise ValueError(
+            "The match must have both LOST and FOUND items."
+        )
+
+    if lost_item.user_id <= 0 or found_item.user_id <= 0:
+        raise ValueError(
+            "Match item owners must have valid user IDs."
+        )
+
+    owner_ids = {lost_item.user_id, found_item.user_id}
+
+    notifications: list[Notification] = []
+
+    for user_id in sorted(owner_ids):
+        existing_notification = get_notification_by_user_and_entity(
+            db,
+            user_id=user_id,
+            notification_type=NOTIFICATION_MATCH_FOUND,
+            entity_type="match",
+            entity_id=match.id,
+        )
+
+        if existing_notification is not None:
+            continue
+
+        notification = create_notification(
+            db,
+            user_id=user_id,
+            notification_type=NOTIFICATION_MATCH_FOUND,
+            title="Potential Match Found",
+            message=(
+                f'A potential match was found between your '
+                f'{lost_item.type} item "{lost_item.title}" '
+                f'and a {found_item.type} item. '
+                f"Match score: {match.score}/100. "
+                f"{match.reason}"
+            ),
+            entity_type="match",
+            entity_id=match.id,
+        )
+
+        notifications.append(notification)
+
+    return notifications
 
 
 # ============================================================================

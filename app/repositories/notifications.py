@@ -3,40 +3,17 @@ TRACKIT Notification Repository.
 
 Database access layer for persistent in-app notifications.
 
-Architecture:
+Business rules and authorization decisions belong in the service layer.
+This module is responsible only for querying and persisting Notification
+records.
 
-    Router
-       ↓
-    Service / Business Rules
-       ↓
-    Notification Repository
-       ↓
-    SQLAlchemy Notification Model
+Security principles:
 
-Responsibilities:
-
-- Create notifications.
-- Retrieve a notification by ID.
-- Retrieve all notifications for a user.
-- Retrieve unread notifications for a user.
-- Count unread notifications for a user.
-- Mark individual notifications as read.
-- Mark all notifications for a user as read.
-- Delete individual notifications.
-- Delete selected notifications for a user.
-- Delete all notifications for a user.
-
-This repository intentionally does NOT perform:
-
-- Authentication.
-- Authorization.
-- Ownership decisions outside database filtering required
-  to safely scope user operations.
-- Notification business-rule validation.
-- Notification type validation.
-- Notification content validation.
-
-Those responsibilities belong to the service and API layers.
+- Queries are always scoped by the relevant user when user ownership
+  matters.
+- Notification content is never interpreted as trusted authorization data.
+- The repository does not decide whether a notification should exist.
+- The repository does not send notifications or perform external actions.
 """
 
 from datetime import datetime, timezone
@@ -67,9 +44,7 @@ def create_notification(
     """
     Create and persist a notification.
 
-    The notification is created as unread.
-
-    Validation and authorization are handled by the service layer.
+    The service layer is responsible for validating the supplied values.
     """
 
     notification = Notification(
@@ -82,7 +57,6 @@ def create_notification(
         title=title,
         message=message,
         is_read=False,
-        read_at=None,
     )
 
     db.add(notification)
@@ -101,15 +75,60 @@ def get_notification_by_id(
     notification_id: int,
 ) -> Notification | None:
     """
-    Retrieve a notification by its primary key.
-
-    This function does not perform ownership or authorization checks.
-    Callers that expose the result to users must enforce ownership
-    through the service layer.
+    Retrieve one notification by ID.
     """
 
-    statement = select(Notification).where(
-        Notification.id == notification_id,
+    return db.scalar(
+        select(Notification).where(
+            Notification.id == notification_id,
+        )
+    )
+
+
+# ============================================================================
+# READ — MATCHING ENTITY NOTIFICATION
+# ============================================================================
+
+
+def get_notification_by_user_and_entity(
+    db: Session,
+    *,
+    user_id: int,
+    notification_type: str,
+    entity_type: str,
+    entity_id: int,
+) -> Notification | None:
+    """
+    Retrieve an existing notification for a specific user and entity.
+
+    This is primarily used to prevent duplicate event notifications.
+
+    Example:
+
+        user_id=12
+        notification_type="match_found"
+        entity_type="match"
+        entity_id=45
+
+    will locate an existing notification representing the notification
+    that Match #45 was found for user #12.
+
+    Ownership is enforced by user_id in the query.
+    """
+
+    statement = (
+        select(Notification)
+        .where(
+            Notification.user_id == user_id,
+            Notification.type == notification_type,
+            Notification.entity_type == entity_type,
+            Notification.entity_id == entity_id,
+        )
+        .order_by(
+            Notification.created_at.desc(),
+            Notification.id.desc(),
+        )
+        .limit(1)
     )
 
     return db.scalar(statement)
@@ -128,17 +147,12 @@ def get_notifications_by_user(
     """
     Retrieve all notifications belonging to a user.
 
-    Results are ordered newest first.
-
-    The notification ID is used as a secondary ordering field to provide
-    deterministic ordering when notifications share the same timestamp.
+    Results are returned newest first.
     """
 
     statement = (
         select(Notification)
-        .where(
-            Notification.user_id == user_id,
-        )
+        .where(Notification.user_id == user_id)
         .order_by(
             Notification.created_at.desc(),
             Notification.id.desc(),
@@ -159,9 +173,9 @@ def get_unread_notifications_by_user(
     user_id: int,
 ) -> list[Notification]:
     """
-    Retrieve all unread notifications belonging to a user.
+    Retrieve unread notifications belonging to a user.
 
-    Results are ordered newest first.
+    Results are returned newest first.
     """
 
     statement = (
@@ -191,16 +205,13 @@ def count_unread_notifications(
 ) -> int:
     """
     Count unread notifications belonging to a user.
-
-    Returns zero when the user has no unread notifications.
     """
 
-    statement = (
-        select(func.count(Notification.id))
-        .where(
-            Notification.user_id == user_id,
-            Notification.is_read.is_(False),
-        )
+    statement = select(
+        func.count(Notification.id)
+    ).where(
+        Notification.user_id == user_id,
+        Notification.is_read.is_(False),
     )
 
     return int(db.scalar(statement) or 0)
@@ -216,19 +227,16 @@ def mark_notification_as_read(
     notification: Notification,
 ) -> Notification:
     """
-    Mark a notification as read.
+    Mark one notification as read.
 
-    If the notification is already read, its original read_at timestamp
-    is preserved.
+    The caller/service is responsible for ownership authorization.
 
-    Ownership and authorization must already have been verified
-    by the service layer.
+    Marking an already-read notification is intentionally idempotent.
     """
 
     if not notification.is_read:
         notification.is_read = True
         notification.read_at = datetime.now(timezone.utc)
-
         db.flush()
 
     return notification
@@ -248,11 +256,6 @@ def mark_all_notifications_as_read(
     Mark all unread notifications belonging to a user as read.
 
     Returns the number of notifications changed.
-
-    Each notification receives the same operation timestamp.
-
-    Already-read notifications are not modified, preserving their
-    original read_at values.
     """
 
     read_at = datetime.now(timezone.utc)
@@ -270,7 +273,6 @@ def mark_all_notifications_as_read(
     )
 
     result = db.execute(statement)
-
     db.flush()
 
     return int(result.rowcount or 0)
@@ -286,10 +288,9 @@ def delete_notification(
     notification: Notification,
 ) -> None:
     """
-    Permanently delete one notification.
+    Delete one notification.
 
-    Ownership and authorization must already have been verified
-    by the service layer.
+    The caller/service is responsible for ownership authorization.
     """
 
     db.delete(notification)
@@ -308,15 +309,11 @@ def delete_selected_notifications(
     notification_ids: list[int],
 ) -> int:
     """
-    Permanently delete selected notifications belonging to a user.
+    Delete selected notifications belonging to a specific user.
 
-    The user_id condition is included directly in the SQL DELETE
-    statement to prevent notifications belonging to another user
-    from being deleted.
+    Notifications belonging to other users are never deleted.
 
-    Nonexistent notification IDs are ignored.
-
-    Returns the number of notifications actually deleted.
+    Returns the number of notifications deleted.
     """
 
     if not notification_ids:
@@ -328,7 +325,6 @@ def delete_selected_notifications(
     )
 
     result = db.execute(statement)
-
     db.flush()
 
     return int(result.rowcount or 0)
@@ -345,13 +341,9 @@ def delete_all_notifications_by_user(
     user_id: int,
 ) -> int:
     """
-    Permanently delete all notifications belonging to a user.
+    Delete all notifications belonging to a specific user.
 
     Returns the number of notifications deleted.
-
-    The user_id condition is deliberately included in the SQL DELETE
-    statement so that notifications belonging to other users cannot
-    be affected.
     """
 
     statement = delete(Notification).where(
@@ -359,8 +351,6 @@ def delete_all_notifications_by_user(
     )
 
     result = db.execute(statement)
-
     db.flush()
 
     return int(result.rowcount or 0)
-

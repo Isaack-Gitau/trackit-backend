@@ -1,4 +1,3 @@
-
 """
 TRACKIT Notification Repository Unit Tests.
 
@@ -14,6 +13,7 @@ Coverage:
 - marking all user notifications as read
 - user isolation
 - notification ordering
+- notification lookup by user and entity
 - empty-result behavior
 
 Architecture under test:
@@ -36,6 +36,7 @@ from app.repositories.notifications import (
     count_unread_notifications,
     create_notification,
     get_notification_by_id,
+    get_notification_by_user_and_entity,
     get_notifications_by_user,
     get_unread_notifications_by_user,
     mark_all_notifications_as_read,
@@ -625,3 +626,140 @@ def test_notification_is_persisted_in_database(db):
     assert persisted.message == notification.message
     assert persisted.is_read is False
 
+
+# ============================================================================
+# READ — NOTIFICATION BY USER AND ENTITY
+# ============================================================================
+
+
+def test_get_notification_by_user_and_entity_returns_matching_notification(
+    db,
+):
+    """
+    A notification should be returned when user, notification type,
+    entity type, and entity ID all match.
+    """
+
+    notification = create_test_notification(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+    )
+
+    notification.entity_type = "match"
+    notification.entity_id = 123
+    db.flush()
+
+    result = get_notification_by_user_and_entity(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+        entity_type="match",
+        entity_id=123,
+    )
+
+    assert result is notification
+
+
+def test_get_notification_by_user_and_entity_is_user_specific(db):
+    """
+    A matching notification belonging to another user must not be
+    returned.
+    """
+
+    notification = create_test_notification(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+    )
+
+    notification.entity_type = "match"
+    notification.entity_id = 123
+    db.flush()
+
+    result = get_notification_by_user_and_entity(
+        db,
+        user_id=TEST_SECOND_USER_ID,
+        notification_type="match_found",
+        entity_type="match",
+        entity_id=123,
+    )
+
+    assert result is None
+
+
+def test_get_notification_by_user_and_entity_is_entity_specific(db):
+    """
+    A notification for a different entity must not be returned.
+    """
+
+    notification = create_test_notification(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+    )
+
+    notification.entity_type = "match"
+    notification.entity_id = 123
+    db.flush()
+
+    result = get_notification_by_user_and_entity(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+        entity_type="match",
+        entity_id=456,
+    )
+
+    assert result is None
+
+
+def test_get_notification_by_user_and_entity_is_type_specific(db):
+    """
+    A notification with a different notification type must not be
+    returned even when the user and entity match.
+    """
+
+    notification = create_test_notification(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="different_notification",
+    )
+
+    notification.entity_type = "match"
+    notification.entity_id = 123
+    db.flush()
+
+    result = get_notification_by_user_and_entity(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+        entity_type="match",
+        entity_id=123,
+    )
+
+    assert result is None
+
+
+def test_get_notification_by_user_and_entity_returns_none_when_missing(
+    db,
+):
+    """
+    A lookup for a notification that does not exist should return None.
+    """
+
+    create_test_notification(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+    )
+
+    result = get_notification_by_user_and_entity(
+        db,
+        user_id=TEST_USER_ID,
+        notification_type="match_found",
+        entity_type="match",
+        entity_id=999,
+    )
+
+    assert result is None
