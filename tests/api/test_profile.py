@@ -277,6 +277,58 @@ def test_update_email_resets_verification(
     assert user.is_verified is False
 
 
+def test_update_email_invalidates_existing_access_token(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Changing the email address invalidates previously issued
+    access tokens by incrementing the user's token version.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=1008,
+        username="tokenuser",
+        email="oldtoken@example.com",
+        is_verified=True,
+    )
+
+    old_headers = authenticated_headers(user)
+
+    # The existing token is valid before the email change.
+    response = client.get(
+        "/api/profile",
+        headers=old_headers,
+    )
+
+    assert response.status_code == 200
+
+    response = client.patch(
+        "/api/profile",
+        headers=old_headers,
+        json={
+            "email": "newtoken@example.com",
+        },
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(user)
+
+    assert user.email == "newtoken@example.com"
+    assert user.is_verified is False
+    assert user.token_version == 1
+
+    # The previously issued JWT still contains token_version=0,
+    # so it must no longer authenticate.
+    response = client.get(
+        "/api/profile",
+        headers=old_headers,
+    )
+
+    assert response.status_code == 401
+
 # ============================================================================
 # NAME UPDATE
 # ============================================================================

@@ -189,6 +189,7 @@ def update_user_profile_service(
       trigger uniqueness conflicts.
     - Profile fields are updated without changing the
       user's authentication sessions.
+    - Changing  the email address invalidates existing authentication sessions  
     - The transaction is flushed but NOT committed.
 
     The request-level database dependency controls
@@ -289,7 +290,8 @@ def update_user_profile_service(
 
     if email_changed:
         user.is_verified = False
-
+        user.token_version += 1
+ 
     # ========================================================================
     # UPDATED TIMESTAMP
     # ========================================================================
