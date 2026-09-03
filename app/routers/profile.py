@@ -122,30 +122,47 @@ def update_profile(
     - social_links
     - preferences
 
-    All fields are optional.
+    PATCH semantics are preserved:
 
-    Only fields explicitly supplied by the client are changed.
+    - Omitted fields are left unchanged.
+    - Nullable fields supplied as null are cleared.
+    - Nullable string fields supplied as an empty string are
+      normalized by the schema to null and therefore cleared.
+    - Required fields cannot be null or empty.
+    - social_links and preferences cannot be null.
+
+    Email changes also invalidate existing authentication
+    sessions through the user service.
     """
 
     # -------------------------------------------------------------------------
-    # Determine which fields were actually supplied.
+    # Determine exactly which fields were supplied.
     #
-    # This is important because PATCH semantics distinguish:
+    # exclude_unset=True is essential for PATCH semantics.
     #
-    #     field omitted
+    # Example:
     #
-    # from:
+    #     {}
     #
-    #     field supplied as null
+    # means "change nothing".
     #
-    # The schema/service combination handles the supported values,
-    # while model_dump(exclude_unset=True) ensures we don't
-    # accidentally overwrite unrelated profile fields.
+    # Whereas:
+    #
+    #     {"bio": None}
+    #
+    # means "explicitly clear the bio".
+    #
+    # We must preserve that distinction when passing the changes
+    # to the service layer.
     # -------------------------------------------------------------------------
 
     changes = profile_data.model_dump(
         exclude_unset=True
     )
+
+    # -------------------------------------------------------------------------
+    # Empty PATCH body
+    # -------------------------------------------------------------------------
 
     if not changes:
         return ProfileResponse.model_validate(
@@ -154,13 +171,24 @@ def update_profile(
 
     # -------------------------------------------------------------------------
     # Update profile
+    #
+    # Pass the complete changes mapping to the service rather than
+    # expanding it into keyword arguments.
+    #
+    # This allows the service/repository to distinguish:
+    #
+    #     field omitted
+    #
+    # from:
+    #
+    #     field explicitly supplied as None
     # -------------------------------------------------------------------------
 
     try:
         updated_user = update_user_profile_service(
             db,
             current_user,
-            **changes,
+            changes,
         )
 
     except ValueError as exc:
@@ -183,6 +211,10 @@ def update_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email is already registered.",
         ) from None
+
+    # -------------------------------------------------------------------------
+    # Return the updated profile.
+    # -------------------------------------------------------------------------
 
     return ProfileResponse.model_validate(
         updated_user
@@ -211,6 +243,7 @@ def get_admin_user_profile(
     Access is restricted to administrators.
 
     The authenticated administrator is identified by the JWT.
+
     The target user ID is used only to identify which user
     the administrator wants to inspect.
 
@@ -227,6 +260,10 @@ def get_admin_user_profile(
         user_id,
     )
 
+    # -------------------------------------------------------------------------
+    # Target user does not exist.
+    # -------------------------------------------------------------------------
+
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -234,11 +271,7 @@ def get_admin_user_profile(
         )
 
     # -------------------------------------------------------------------------
-    # Serialize through the dedicated administrative schema.
-    #
-    # Never return the SQLAlchemy User model directly.
-    # This prevents accidental exposure of password hashes,
-    # token versions, authentication tokens, or other secrets.
+    # Return the safe administrative representation.
     # -------------------------------------------------------------------------
 
     return AdminUserDetailResponse.model_validate(

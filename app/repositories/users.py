@@ -17,10 +17,31 @@ Business rules such as authorization and profile validation
 belong in the service layer.
 """
 
+from collections.abc import Mapping
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.user import User
+
+
+# ============================================================================
+# PROFILE UPDATE FIELDS
+# ============================================================================
+
+
+PROFILE_UPDATE_FIELDS = {
+    "username",
+    "email",
+    "first_name",
+    "last_name",
+    "profile_picture",
+    "phone_number",
+    "bio",
+    "address",
+    "social_links",
+    "preferences",
+}
 
 
 # ============================================================================
@@ -266,57 +287,38 @@ def get_user_by_email_excluding_id(
 def update_user_profile(
     db: Session,
     user: User,
-    *,
-    username: str | None = None,
-    email: str | None = None,
-    first_name: str | None = None,
-    last_name: str | None = None,
-    profile_picture: str | None = None,
-    phone_number: str | None = None,
-    bio: str | None = None,
-    address: str | None = None,
-    social_links: dict[str, object] | None = None,
-    preferences: dict[str, object] | None = None,
+    changes: Mapping[str, object],
 ) -> User:
     """
-    Apply profile changes to a User.
+    Apply explicitly supplied profile changes to a User.
 
-    Only fields explicitly supplied by the service layer
-    are modified.
+    PATCH semantics:
+
+    - A field present in ``changes`` is updated.
+    - A field absent from ``changes`` is left untouched.
+    - ``None`` is preserved for nullable fields so that the
+      service layer can explicitly clear them.
+
+    Business validation and normalization belong in the service layer.
 
     This function does not commit the transaction. The request-level
     database dependency controls commit/rollback behavior.
     """
 
-    if username is not None:
-        user.username = username.strip().lower()
+    unknown_fields = set(changes) - PROFILE_UPDATE_FIELDS
 
-    if email is not None:
-        user.email = email.strip().lower()
+    if unknown_fields:
+        raise ValueError(
+            "Unsupported profile fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
 
-    if first_name is not None:
-        user.first_name = first_name.strip()
-
-    if last_name is not None:
-        user.last_name = last_name.strip()
-
-    if profile_picture is not None:
-        user.profile_picture = profile_picture.strip()
-
-    if phone_number is not None:
-        user.phone_number = phone_number.strip()
-
-    if bio is not None:
-        user.bio = bio.strip()
-
-    if address is not None:
-        user.address = address.strip()
-
-    if social_links is not None:
-        user.social_links = social_links
-
-    if preferences is not None:
-        user.preferences = preferences
+    for field, value in changes.items():
+        setattr(
+            user,
+            field,
+            value,
+        )
 
     db.add(user)
     db.flush()

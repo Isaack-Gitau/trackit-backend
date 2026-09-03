@@ -19,16 +19,6 @@ Profile fields include:
 
 Authentication and authorization secrets are deliberately
 excluded from all profile responses.
-
-Administrative profile responses may contain additional
-account-management information, but never expose:
-
-- password hashes
-- authentication tokens
-- token versions
-- password reset tokens
-- email verification tokens
-- other authentication secrets
 """
 
 from datetime import datetime
@@ -183,6 +173,12 @@ class ProfileUpdate(BaseModel):
 
     All fields are optional because the profile endpoint
     uses PATCH semantics.
+
+    Important PATCH semantics:
+
+    - Omitted field = do not change the existing value.
+    - Explicit null = clear the value when the database field
+      is nullable.
     """
 
     username: str | None = Field(
@@ -193,7 +189,7 @@ class ProfileUpdate(BaseModel):
 
     email: str | None = Field(
         default=None,
-        max_length=320,
+        max_length=255,
     )
 
     first_name: str | None = Field(
@@ -233,7 +229,7 @@ class ProfileUpdate(BaseModel):
     preferences: dict[str, object] | None = None
 
     # ========================================================================
-    # VALIDATORS
+    # REQUIRED STRING FIELDS
     # ========================================================================
 
     @field_validator("username")
@@ -243,12 +239,16 @@ class ProfileUpdate(BaseModel):
         value: str | None,
     ) -> str | None:
         """
-        Normalize username to lowercase and remove
-        surrounding whitespace.
+        Normalize username.
+
+        A missing username is allowed because this is PATCH.
+        An explicitly supplied null username is rejected.
         """
 
         if value is None:
-            return None
+            raise ValueError(
+                "Username cannot be null."
+            )
 
         value = value.strip().lower()
 
@@ -259,6 +259,8 @@ class ProfileUpdate(BaseModel):
 
         return value
 
+    # ------------------------------------------------------------------------
+
     @field_validator("email")
     @classmethod
     def normalize_email(
@@ -266,28 +268,29 @@ class ProfileUpdate(BaseModel):
         value: str | None,
     ) -> str | None:
         """
-        Normalize email to lowercase and remove
-        surrounding whitespace.
+        Normalize and validate email.
 
-        Email validation is intentionally kept at the
-        application level rather than using Pydantic's
-        EmailStr because the test and development environment
-        legitimately uses reserved .test domains.
+        A missing email is allowed because this is PATCH.
+        An explicitly supplied null or empty email is rejected.
+
+        Email validation intentionally remains application-level
+        rather than using Pydantic EmailStr because the test and
+        development environment legitimately uses reserved .test
+        domains.
         """
 
         if value is None:
-            return None
+            raise ValueError(
+                "Email cannot be null."
+            )
 
         value = value.strip().lower()
 
         if not value:
-            return None
+            raise ValueError(
+                "Email cannot be empty."
+            )
 
-        # Basic structural validation.
-        #
-        # This intentionally does not reject reserved domains
-        # such as .test, which are valid for development and
-        # automated testing.
         if (
             "@" not in value
             or value.startswith("@")
@@ -313,23 +316,86 @@ class ProfileUpdate(BaseModel):
 
         return value
 
-    @field_validator(
-        "first_name",
-        "last_name",
-        "phone_number",
-        "bio",
-        "address",
-        "profile_picture",
-    )
+    # ------------------------------------------------------------------------
+
+    @field_validator("first_name")
     @classmethod
-    def normalize_optional_strings(
+    def normalize_first_name(
         cls,
         value: str | None,
     ) -> str | None:
         """
-        Trim optional string fields.
+        Normalize first name.
 
-        Empty strings are converted to None.
+        Explicit null and empty values are rejected because
+        first_name is non-nullable in the database.
+        """
+
+        if value is None:
+            raise ValueError(
+                "First name cannot be null."
+            )
+
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "First name cannot be empty."
+            )
+
+        return value
+
+    # ------------------------------------------------------------------------
+
+    @field_validator("last_name")
+    @classmethod
+    def normalize_last_name(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        """
+        Normalize last name.
+
+        Explicit null and empty values are rejected because
+        last_name is non-nullable in the database.
+        """
+
+        if value is None:
+            raise ValueError(
+                "Last name cannot be null."
+            )
+
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "Last name cannot be empty."
+            )
+
+        return value
+
+    # ========================================================================
+    # NULLABLE STRING FIELDS
+    # ========================================================================
+
+    @field_validator(
+        "profile_picture",
+        "phone_number",
+        "bio",
+        "address",
+    )
+    @classmethod
+    def normalize_nullable_strings(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        """
+        Normalize nullable profile strings.
+
+        Explicit null clears the database value.
+
+        Empty strings are also treated as clear operations and
+        therefore become None.
         """
 
         if value is None:
@@ -339,5 +405,51 @@ class ProfileUpdate(BaseModel):
 
         if not value:
             return None
+
+        return value
+
+    # ========================================================================
+    # NON-NULL JSON FIELDS
+    # ========================================================================
+
+    @field_validator("social_links")
+    @classmethod
+    def validate_social_links(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """
+        Validate social_links.
+
+        The database column is non-nullable, so explicit null
+        is rejected.
+        """
+
+        if value is None:
+            raise ValueError(
+                "Social links cannot be null."
+            )
+
+        return value
+
+    # ------------------------------------------------------------------------
+
+    @field_validator("preferences")
+    @classmethod
+    def validate_preferences(
+        cls,
+        value: dict[str, object] | None,
+    ) -> dict[str, object] | None:
+        """
+        Validate preferences.
+
+        The database column is non-nullable, so explicit null
+        is rejected.
+        """
+
+        if value is None:
+            raise ValueError(
+                "Preferences cannot be null."
+            )
 
         return value

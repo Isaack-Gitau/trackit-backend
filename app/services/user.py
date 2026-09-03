@@ -22,6 +22,7 @@ Transaction policy:
   successful requests and rolling back failed requests.
 """
 
+from collections.abc import Mapping
 from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
@@ -38,6 +39,40 @@ from app.repositories.users import (
     get_user_by_username_excluding_id,
     update_user_profile,
 )
+
+
+# ============================================================================
+# PROFILE UPDATE FIELDS
+# ============================================================================
+
+PROFILE_UPDATE_FIELDS = {
+    "username",
+    "email",
+    "first_name",
+    "last_name",
+    "profile_picture",
+    "phone_number",
+    "bio",
+    "address",
+    "social_links",
+    "preferences",
+}
+
+PROFILE_REQUIRED_FIELDS = {
+    "username",
+    "email",
+    "first_name",
+    "last_name",
+    "social_links",
+    "preferences",
+}
+
+PROFILE_NULLABLE_FIELDS = {
+    "profile_picture",
+    "phone_number",
+    "bio",
+    "address",
+}
 
 
 # ============================================================================
@@ -162,71 +197,206 @@ def create_user_account(
 def update_user_profile_service(
     db: Session,
     user: User,
-    *,
-    username: str | None = None,
-    email: str | None = None,
-    first_name: str | None = None,
-    last_name: str | None = None,
-    profile_picture: str | None = None,
-    phone_number: str | None = None,
-    bio: str | None = None,
-    address: str | None = None,
-    social_links: dict[str, object] | None = None,
-    preferences: dict[str, object] | None = None,
+    changes: Mapping[str, object],
 ) -> User:
     """
     Update the authenticated user's profile.
 
-    Business rules:
+    PATCH semantics:
 
-    - Username must be unique.
-    - Email must be unique.
+    - Only fields present in ``changes`` are modified.
+    - A field omitted from ``changes`` remains unchanged.
+    - Nullable profile fields may explicitly be set to None.
+    - Required profile fields may not be None.
     - Username is normalized to lowercase.
     - Email is normalized to lowercase.
-    - Changing the email address removes the existing
-      email verification status.
-    - The authenticated user's own username/email do not
-      trigger uniqueness conflicts.
-    - Profile fields are updated without changing the
-      user's authentication sessions.
-    - Changing  the email address invalidates existing authentication sessions  
-    - The transaction is flushed but NOT committed.
+    - Username/email uniqueness is checked against other users.
+    - Changing the email address removes email verification.
+    - Changing the email address increments token_version and
+      therefore invalidates existing authentication sessions.
+    - Other profile changes do not invalidate authentication sessions.
 
-    The request-level database dependency controls
-    commit and rollback behavior.
+    The transaction is flushed but NOT committed.
+
+    The request-level database dependency controls commit
+    and rollback behavior.
     """
+
+    # ========================================================================
+    # COPY AND VALIDATE SUPPLIED FIELDS
+    # ========================================================================
+
+    changes = dict(changes)
+
+    unknown_fields = set(changes) - PROFILE_UPDATE_FIELDS
+
+    if unknown_fields:
+        raise ValueError(
+            "Unsupported profile fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+
+    # ========================================================================
+    # VALIDATE NULL VALUES
+    # ========================================================================
+
+    for field in PROFILE_REQUIRED_FIELDS:
+        if field in changes and changes[field] is None:
+            raise ValueError(
+                f"{field} cannot be null."
+            )
+
+    for field in PROFILE_NULLABLE_FIELDS:
+        if field in changes and changes[field] is not None:
+            if not isinstance(changes[field], str):
+                raise ValueError(
+                    f"{field} must be a string or null."
+                )
 
     # ========================================================================
     # NORMALIZE USERNAME
     # ========================================================================
 
-    normalized_username = None
+    if "username" in changes:
+        username = changes["username"]
 
-    if username is not None:
+        if not isinstance(username, str):
+            raise ValueError(
+                "Username must be a string."
+            )
+
         normalized_username = (
             username.strip().lower()
         )
+
+        if not normalized_username:
+            raise ValueError(
+                "Username cannot be empty."
+            )
+
+        changes["username"] = normalized_username
 
     # ========================================================================
     # NORMALIZE EMAIL
     # ========================================================================
 
-    normalized_email = None
+    if "email" in changes:
+        email = changes["email"]
 
-    if email is not None:
+        if not isinstance(email, str):
+            raise ValueError(
+                "Email must be a string."
+            )
+
         normalized_email = (
             email.strip().lower()
         )
+
+        if not normalized_email:
+            raise ValueError(
+                "Email cannot be empty."
+            )
+
+        changes["email"] = normalized_email
+
+    # ========================================================================
+    # NORMALIZE REQUIRED NAME FIELDS
+    # ========================================================================
+
+    if "first_name" in changes:
+        first_name = changes["first_name"]
+
+        if not isinstance(first_name, str):
+            raise ValueError(
+                "First name must be a string."
+            )
+
+        first_name = first_name.strip()
+
+        if not first_name:
+            raise ValueError(
+                "First name cannot be empty."
+            )
+
+        changes["first_name"] = first_name
+
+    if "last_name" in changes:
+        last_name = changes["last_name"]
+
+        if not isinstance(last_name, str):
+            raise ValueError(
+                "Last name must be a string."
+            )
+
+        last_name = last_name.strip()
+
+        if not last_name:
+            raise ValueError(
+                "Last name cannot be empty."
+            )
+
+        changes["last_name"] = last_name
+
+    # ========================================================================
+    # NORMALIZE NULLABLE STRING FIELDS
+    #
+    # None means "clear this field".
+    # A non-None value is stored after trimming whitespace.
+    # ========================================================================
+
+    for field in PROFILE_NULLABLE_FIELDS:
+        if field not in changes:
+            continue
+
+        value = changes[field]
+
+        if value is None:
+            continue
+
+        if not isinstance(value, str):
+            raise ValueError(
+                f"{field} must be a string or null."
+            )
+
+        value = value.strip()
+
+        if not value:
+            changes[field] = None
+        else:
+            changes[field] = value
+
+    # ========================================================================
+    # VALIDATE JSON PROFILE FIELDS
+    # ========================================================================
+
+    for field in (
+        "social_links",
+        "preferences",
+    ):
+        if field not in changes:
+            continue
+
+        value = changes[field]
+
+        if value is None:
+            raise ValueError(
+                f"{field} cannot be null."
+            )
+
+        if not isinstance(value, dict):
+            raise ValueError(
+                f"{field} must be an object."
+            )
 
     # ========================================================================
     # USERNAME UNIQUENESS
     # ========================================================================
 
-    if normalized_username is not None:
+    if "username" in changes:
         existing_username_user = (
             get_user_by_username_excluding_id(
                 db,
-                normalized_username,
+                changes["username"],
                 user.id,
             )
         )
@@ -240,11 +410,11 @@ def update_user_profile_service(
     # EMAIL UNIQUENESS
     # ========================================================================
 
-    if normalized_email is not None:
+    if "email" in changes:
         existing_email_user = (
             get_user_by_email_excluding_id(
                 db,
-                normalized_email,
+                changes["email"],
                 user.id,
             )
         )
@@ -259,8 +429,8 @@ def update_user_profile_service(
     # ========================================================================
 
     email_changed = (
-        normalized_email is not None
-        and normalized_email != user.email
+        "email" in changes
+        and changes["email"] != user.email
     )
 
     # ========================================================================
@@ -270,28 +440,20 @@ def update_user_profile_service(
     update_user_profile(
         db,
         user,
-        username=normalized_username,
-        email=normalized_email,
-        first_name=first_name,
-        last_name=last_name,
-        profile_picture=profile_picture,
-        phone_number=phone_number,
-        bio=bio,
-        address=address,
-        social_links=social_links,
-        preferences=preferences,
+        changes,
     )
 
     # ========================================================================
-    # EMAIL VERIFICATION
+    # EMAIL VERIFICATION / SESSION INVALIDATION
     #
-    # A new email address must be verified.
+    # Only an actual email change invalidates existing sessions.
+    # Updating other profile fields leaves token_version unchanged.
     # ========================================================================
 
     if email_changed:
         user.is_verified = False
         user.token_version += 1
- 
+
     # ========================================================================
     # UPDATED TIMESTAMP
     # ========================================================================

@@ -1106,3 +1106,455 @@ def test_admin_can_view_inactive_user(
 
     assert data["id"] == target_user.id
     assert data["is_active"] is False
+
+    # ============================================================================
+# PATCH NULL / CLEAR SEMANTICS
+# ============================================================================
+
+
+def test_update_profile_can_clear_bio(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=101,
+        username="clearbio",
+        email="clearbio@example.com",
+    )
+
+    user.bio = "This should be cleared."
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "bio": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["bio"] is None
+
+    db.refresh(user)
+
+    assert user.bio is None
+
+
+def test_update_profile_can_clear_phone_number(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=102,
+        username="clearphone",
+        email="clearphone@example.com",
+    )
+
+    user.phone_number = "+254711111111"
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "phone_number": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["phone_number"] is None
+
+    db.refresh(user)
+
+    assert user.phone_number is None
+
+
+def test_update_profile_can_clear_profile_picture(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=103,
+        username="clearpicture",
+        email="clearpicture@example.com",
+    )
+
+    user.profile_picture = "https://example.com/profile.jpg"
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "profile_picture": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["profile_picture"] is None
+
+    db.refresh(user)
+
+    assert user.profile_picture is None
+
+
+def test_update_profile_can_clear_address(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=104,
+        username="clearaddress",
+        email="clearaddress@example.com",
+    )
+
+    user.address = "Nairobi"
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "address": None,
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["address"] is None
+
+    db.refresh(user)
+
+    assert user.address is None
+
+
+# ============================================================================
+# REQUIRED FIELD NULL VALIDATION
+# ============================================================================
+
+
+def test_update_profile_rejects_null_username(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=105,
+        username="nullusername",
+        email="nullusername@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "username": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_null_email(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=106,
+        username="nullemail",
+        email="nullemail@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "email": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_null_first_name(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=107,
+        username="nullfirstname",
+        email="nullfirstname@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "first_name": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_null_last_name(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=108,
+        username="nulllastname",
+        email="nulllastname@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "last_name": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+# ============================================================================
+# REQUIRED FIELD EMPTY STRING VALIDATION
+# ============================================================================
+
+
+def test_update_profile_rejects_empty_username(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=109,
+        username="emptyusername",
+        email="emptyusername@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "username": "",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_empty_email(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=110,
+        username="emptyemail",
+        email="emptyemail@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "email": "",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_empty_first_name(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=111,
+        username="emptyfirstname",
+        email="emptyfirstname@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "first_name": "",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_empty_last_name(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=112,
+        username="emptylastname",
+        email="emptylastname@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "last_name": "",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+# ============================================================================
+# NON-NULL JSON FIELD VALIDATION
+# ============================================================================
+
+
+def test_update_profile_rejects_null_social_links(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=113,
+        username="nullsocial",
+        email="nullsocial@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "social_links": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_update_profile_rejects_null_preferences(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=114,
+        username="nullpreferences",
+        email="nullpreferences@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "preferences": None,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+# ============================================================================
+# EMPTY STRING CLEARING FOR NULLABLE FIELDS
+# ============================================================================
+
+
+def test_update_profile_empty_nullable_strings_clear_values(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=115,
+        username="emptynullable",
+        email="emptynullable@example.com",
+    )
+
+    user.profile_picture = "profile.jpg"
+    user.phone_number = "+254711111111"
+    user.bio = "Biography"
+    user.address = "Nairobi"
+
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "profile_picture": "",
+            "phone_number": "",
+            "bio": "",
+            "address": "",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["profile_picture"] is None
+    assert data["phone_number"] is None
+    assert data["bio"] is None
+    assert data["address"] is None
+
+    db.refresh(user)
+
+    assert user.profile_picture is None
+    assert user.phone_number is None
+    assert user.bio is None
+    assert user.address is None
+
+
+# ============================================================================
+# PATCH OMISSION SEMANTICS
+# ============================================================================
+
+
+def test_update_profile_omitted_nullable_field_remains_unchanged(
+    client,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=116,
+        username="omittednullable",
+        email="omittednullable@example.com",
+    )
+
+    user.bio = "Keep this biography."
+    user.phone_number = "+254722222222"
+    db.flush()
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "first_name": "Changed",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["first_name"] == "Changed"
+    assert data["bio"] == "Keep this biography."
+    assert data["phone_number"] == "+254722222222"
+
+    db.refresh(user)
+
+    assert user.bio == "Keep this biography."
+    assert user.phone_number == "+254722222222"
