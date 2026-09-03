@@ -811,3 +811,610 @@ def test_normal_user_cannot_approve_claim(
     )
 
     assert response.status_code == 403
+
+# ============================================================================
+# CLAIM RETRIEVAL AUTHORIZATION
+# ============================================================================
+
+
+def test_claimant_can_view_own_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1040,
+        username="apiowner_view_own",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1041,
+        username="apiclaimant_view_own",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove this item belongs to me.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.get(
+        f"/api/claims/{claim_id}",
+        headers=auth_headers(claimant),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == claim_id
+    assert response.json()["claimant_id"] == claimant.id
+
+
+def test_normal_user_cannot_view_another_users_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1042,
+        username="apiowner_view_other",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1043,
+        username="apiclaimant_view_other",
+    )
+
+    other_user = create_user(
+        db,
+        user_id=1044,
+        username="apiother_view_other",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove this item belongs to me.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.get(
+        f"/api/claims/{claim_id}",
+        headers=auth_headers(other_user),
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_can_view_any_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1045,
+        username="apiowner_admin_view",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1046,
+        username="apiclaimant_admin_view",
+    )
+
+    admin = create_user(
+        db,
+        user_id=1047,
+        username="apiadmin_view_claim",
+        role="admin",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove this item belongs to me.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.get(
+        f"/api/claims/{claim_id}",
+        headers=auth_headers(admin),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["id"] == claim_id
+
+
+def test_nonexistent_claim_returns_404(
+    client,
+    db,
+):
+    user = create_user(
+        db,
+        user_id=1048,
+        username="apiclaimant_missing_claim",
+    )
+
+    response = client.get(
+        "/api/claims/999999",
+        headers=auth_headers(user),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Claim not found."
+
+
+# ============================================================================
+# MY CLAIMS
+# ============================================================================
+
+
+def test_user_can_list_own_claims(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1049,
+        username="apiowner_my_claims",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1050,
+        username="apiclaimant_my_claims",
+    )
+
+    item_one = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    item_two = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    first = client.post(
+        f"/api/claims/items/{item_one.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    second = client.post(
+        f"/api/claims/items/{item_two.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can provide proof for this item.",
+        },
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+
+    response = client.get(
+        "/api/claims/me",
+        headers=auth_headers(claimant),
+    )
+
+    assert response.status_code == 200
+
+    claim_ids = {
+        claim["id"]
+        for claim in response.json()
+    }
+
+    assert first.json()["id"] in claim_ids
+    assert second.json()["id"] in claim_ids
+
+    assert all(
+        claim["claimant_id"] == claimant.id
+        for claim in response.json()
+    )
+
+
+def test_unauthenticated_user_cannot_list_own_claims(
+    client,
+    db,
+):
+    response = client.get(
+        "/api/claims/me",
+    )
+
+    assert response.status_code == 401
+
+
+# ============================================================================
+# WITHDRAW AUTHORIZATION
+# ============================================================================
+
+
+def test_claimant_can_withdraw_own_pending_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1051,
+        username="apiowner_withdraw",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1052,
+        username="apiclaimant_withdraw",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove that this item belongs to me.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.post(
+        f"/api/claims/{claim_id}/withdraw",
+        headers=auth_headers(claimant),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "withdrawn"
+
+
+def test_another_user_cannot_withdraw_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1053,
+        username="apiowner_withdraw_other",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1054,
+        username="apiclaimant_withdraw_other",
+    )
+
+    other_user = create_user(
+        db,
+        user_id=1055,
+        username="apiother_withdraw",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove that this item belongs to me.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.post(
+        f"/api/claims/{claim_id}/withdraw",
+        headers=auth_headers(other_user),
+    )
+
+    assert response.status_code == 403
+
+
+def test_nonexistent_claim_cannot_be_withdrawn(
+    client,
+    db,
+):
+    claimant = create_user(
+        db,
+        user_id=1056,
+        username="apiwithdraw_missing",
+    )
+
+    response = client.post(
+        "/api/claims/999999/withdraw",
+        headers=auth_headers(claimant),
+    )
+
+    assert response.status_code == 404
+
+
+# ============================================================================
+# ADMIN PENDING CLAIMS
+# ============================================================================
+
+
+def test_admin_can_list_pending_claims(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1057,
+        username="apiowner_pending_list",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1058,
+        username="apiclaimant_pending_list",
+    )
+
+    admin = create_user(
+        db,
+        user_id=1059,
+        username="apiadmin_pending_list",
+        role="admin",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.get(
+        "/api/claims/admin/pending",
+        headers=auth_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    claim_ids = {
+        claim["id"]
+        for claim in response.json()
+    }
+
+    assert claim_id in claim_ids
+
+
+def test_normal_user_cannot_list_pending_claims(
+    client,
+    db,
+):
+    user = create_user(
+        db,
+        user_id=1060,
+        username="apinormal_pending_list",
+    )
+
+    response = client.get(
+        "/api/claims/admin/pending",
+        headers=auth_headers(user),
+    )
+
+    assert response.status_code == 403
+
+
+def test_unauthenticated_user_cannot_list_pending_claims(
+    client,
+    db,
+):
+    response = client.get(
+        "/api/claims/admin/pending",
+    )
+
+    assert response.status_code == 401
+
+
+# ============================================================================
+# ADMIN REJECTION
+# ============================================================================
+
+
+def test_admin_can_reject_pending_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1061,
+        username="apiowner_reject",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1062,
+        username="apiclaimant_reject",
+    )
+
+    admin = create_user(
+        db,
+        user_id=1063,
+        username="apiadmin_reject",
+        role="admin",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.patch(
+        f"/api/claims/admin/{claim_id}/reject",
+        headers=auth_headers(admin),
+        json={
+            "rejection_reason": "Insufficient proof of ownership.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert (
+        response.json()["rejection_reason"]
+        == "Insufficient proof of ownership."
+    )
+
+
+def test_normal_user_cannot_reject_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1064,
+        username="apiowner_normal_reject",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1065,
+        username="apiclaimant_normal_reject",
+    )
+
+    normal_user = create_user(
+        db,
+        user_id=1066,
+        username="apinormal_reject",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.patch(
+        f"/api/claims/admin/{claim_id}/reject",
+        headers=auth_headers(normal_user),
+        json={
+            "rejection_reason": "Insufficient proof.",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_rejection_requires_a_reason_at_api_level(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1067,
+        username="apiowner_reject_validation",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1068,
+        username="apiclaimant_reject_validation",
+    )
+
+    admin = create_user(
+        db,
+        user_id=1069,
+        username="apiadmin_reject_validation",
+        role="admin",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.patch(
+        f"/api/claims/admin/{claim_id}/reject",
+        headers=auth_headers(admin),
+        json={
+            "rejection_reason": "No",
+        },
+    )
+
+    assert response.status_code == 422
