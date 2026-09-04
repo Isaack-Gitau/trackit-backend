@@ -155,8 +155,16 @@ class User(Base):
 
     items = relationship(
         "Item",
+        foreign_keys="Item.user_id",
         back_populates="owner",
         cascade="all, delete-orphan",
+    )
+
+    reviewed_items = relationship(
+        "Item",
+        foreign_keys="Item.reviewed_by",
+        back_populates="reviewer",
+        passive_deletes=True,
     )
 
     auth_tokens = relationship(

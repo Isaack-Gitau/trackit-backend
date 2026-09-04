@@ -7,10 +7,21 @@ Business rules and authorization decisions belong in the service layer.
 This module is responsible only for querying and persisting Item records.
 """
 
+from typing import Final
+
+from datetime import datetime
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models.item import Item
+
+
+# ============================================================================
+# UPDATE SENTINEL
+# ============================================================================
+
+IMAGE_UNSET: Final = object()
 
 
 # ============================================================================
@@ -30,10 +41,10 @@ def create_item(
     image: str | None = None,
 ) -> Item:
     """
-    Create and persist a new item.
+    Create a new item.
 
-    The repository does not decide whether the user is allowed
-    to create the item. That belongs to the service layer.
+    The image value is expected to be a server-generated storage key
+    produced by the image sanitization layer.
     """
 
     item = Item(
@@ -62,16 +73,21 @@ def get_item_by_id(
     item_id: int,
 ) -> Item | None:
     """
-    Retrieve an item by its primary key.
+    Retrieve an item by primary key.
+
+    This function deliberately does not apply visibility rules.
+    Public visibility belongs in the service layer.
     """
 
     return db.scalar(
-        select(Item).where(Item.id == item_id)
+        select(Item).where(
+            Item.id == item_id,
+        )
     )
 
 
 # ============================================================================
-# READ — OWNER
+# READ — USER ITEMS
 # ============================================================================
 
 
@@ -86,15 +102,92 @@ def get_items_by_user(
 
     statement = (
         select(Item)
-        .where(Item.user_id == user_id)
-        .order_by(Item.created_at.desc())
+        .where(
+            Item.user_id == user_id,
+        )
+        .order_by(
+            Item.created_at.desc(),
+        )
     )
 
-    return list(db.scalars(statement).all())
+    return list(
+        db.scalars(statement).all()
+    )
 
 
 # ============================================================================
-# READ — APPROVED ITEMS FOR MATCHING
+# READ — PUBLIC ITEMS
+# ============================================================================
+
+
+def get_public_items(
+    db: Session,
+    *,
+    search: str | None = None,
+    item_type: str | None = None,
+    category: str | None = None,
+    location: str | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> list[Item]:
+    """
+    Retrieve publicly visible items.
+
+    Only approved and claimed items are exposed.
+    """
+
+    statement = select(Item).where(
+        Item.status.in_(
+            [
+                "approved",
+                "claimed",
+            ]
+        )
+    )
+
+    if search:
+        search_pattern = f"%{search}%"
+
+        statement = statement.where(
+            or_(
+                Item.title.ilike(search_pattern),
+                Item.description.ilike(search_pattern),
+                Item.category.ilike(search_pattern),
+                Item.location.ilike(search_pattern),
+            )
+        )
+
+    if item_type:
+        statement = statement.where(
+            Item.type == item_type,
+        )
+
+    if category:
+        statement = statement.where(
+            Item.category.ilike(category),
+        )
+
+    if location:
+        statement = statement.where(
+            Item.location.ilike(location),
+        )
+
+    statement = (
+        statement
+        .order_by(
+            Item.created_at.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    return list(
+        db.scalars(statement).all()
+    )
+
+
+# ============================================================================
+# READ — APPROVED ITEMS BY TYPE
 # ============================================================================
 
 
@@ -104,12 +197,9 @@ def get_approved_items_by_type(
     item_type: str,
 ) -> list[Item]:
     """
-    Retrieve all approved items of a specific type.
+    Retrieve approved items of a specific type.
 
-    This query is intended for the matching workflow.
-
-    Matching must consider all approved candidates rather than
-    using the paginated public item query.
+    Used by the matching service when generating potential matches.
     """
 
     statement = (
@@ -118,14 +208,18 @@ def get_approved_items_by_type(
             Item.type == item_type,
             Item.status == "approved",
         )
-        .order_by(Item.created_at.desc())
+        .order_by(
+            Item.created_at.desc(),
+        )
     )
 
-    return list(db.scalars(statement).all())
+    return list(
+        db.scalars(statement).all()
+    )
 
 
 # ============================================================================
-# SEARCH / FILTER / PAGINATION
+# READ — ALL ITEMS
 # ============================================================================
 
 
@@ -141,15 +235,10 @@ def get_items(
     limit: int = 20,
 ) -> list[Item]:
     """
-    Retrieve items using optional filters and pagination.
+    Retrieve items with optional filters.
 
-    Search currently checks:
-        - title
-        - description
-        - category
-        - location
-
-    Results are newest first.
+    This is an unrestricted/internal query and may return items
+    in any moderation status.
     """
 
     statement = select(Item)
@@ -168,32 +257,36 @@ def get_items(
 
     if item_type:
         statement = statement.where(
-            Item.type == item_type
+            Item.type == item_type,
         )
 
     if category:
         statement = statement.where(
-            Item.category.ilike(category)
+            Item.category.ilike(category),
         )
 
     if location:
         statement = statement.where(
-            Item.location.ilike(location)
+            Item.location.ilike(location),
         )
 
     if status:
         statement = statement.where(
-            Item.status == status
+            Item.status == status,
         )
 
     statement = (
         statement
-        .order_by(Item.created_at.desc())
+        .order_by(
+            Item.created_at.desc(),
+        )
         .offset(offset)
         .limit(limit)
     )
 
-    return list(db.scalars(statement).all())
+    return list(
+        db.scalars(statement).all()
+    )
 
 
 # ============================================================================
@@ -210,12 +303,25 @@ def update_item(
     item_type: str | None = None,
     category: str | None = None,
     location: str | None = None,
-    image: str | None = None,
+    image: str | None | object = IMAGE_UNSET,
 ) -> Item:
     """
-    Update supplied item fields.
+    Update an existing item.
 
-    Authorization must be performed before this function is called.
+    Image semantics:
+
+        image=IMAGE_UNSET
+            Leave the current image unchanged.
+
+        image=None
+            Explicitly remove the current image.
+
+        image="items/..."
+            Replace the current image with the supplied storage key.
+
+    The service layer is responsible for authorization and for
+    ensuring that supplied image storage keys were generated by
+    the trusted image-processing layer.
     """
 
     if title is not None:
@@ -233,8 +339,8 @@ def update_item(
     if location is not None:
         item.location = location
 
-    if image is not None:
-        item.image = image
+    if image is not IMAGE_UNSET:
+        item.image = image  # type: ignore[assignment]
 
     db.flush()
 
@@ -242,28 +348,27 @@ def update_item(
 
 
 # ============================================================================
-# UPDATE — STATUS
+# UPDATE STATUS
 # ============================================================================
-
 
 def update_item_status(
     db: Session,
     item: Item,
     *,
     status: str,
+    rejection_reason: str | None = None,
+    reviewed_by: int | None = None,
+    reviewed_at: datetime | None = None,
 ) -> Item:
-    """
-    Update the status of an item.
-
-    Authorization and business rules must be handled
-    by the service layer.
-    """
-
     item.status = status
+    item.rejection_reason = rejection_reason
+    item.reviewed_by = reviewed_by
+    item.reviewed_at = reviewed_at
+
     db.flush()
+    db.refresh(item)
 
     return item
-
 
 # ============================================================================
 # DELETE
@@ -277,8 +382,10 @@ def delete_item(
     """
     Delete an item.
 
-    Authorization must be handled by the service layer.
+    Database cascade rules handle related records according
+    to the Item model configuration.
     """
 
     db.delete(item)
+
     db.flush()

@@ -35,7 +35,7 @@ from app.db.session import engine
 
 EXPECTED_DATABASE = "trackit_db"
 EXPECTED_DATABASE_USER = "trackit_app"
-EXPECTED_ALEMBIC_HEAD = "088ed680f98d"
+EXPECTED_ALEMBIC_HEAD = "c5255806686f"
 
 # ============================================================================
 # DATABASE CONNECTION

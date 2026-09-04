@@ -85,6 +85,83 @@ class Settings(BaseSettings):
     REGISTER_RATE_LIMIT_WINDOW_SECONDS: int = 900
 
     # ========================================================================
+    # Media / Image Uploads
+    # ========================================================================
+
+    """
+    Configuration for user-uploaded media.
+
+    Uploaded files are stored outside the application package
+    under the configured MEDIA_ROOT.
+
+    Development default:
+        storage/media
+
+    Production:
+        MEDIA_ROOT should be configured through the environment
+        or deployment configuration.
+    """
+
+    MEDIA_ROOT: str = "storage/media"
+
+    """
+    Public URL prefix used when serving approved media files.
+
+    Example:
+
+        /media/items/<generated-file-name>.jpg
+    """
+
+    MEDIA_URL: str = "/media"
+
+    """
+    Maximum accepted image upload size.
+
+    Default:
+        5 MiB
+
+    The upload implementation must enforce this limit while
+    reading the request body rather than trusting Content-Length.
+    """
+
+    IMAGE_MAX_SIZE_BYTES: int = 5 * 1024 * 1024
+
+    """
+    Maximum decoded image dimensions.
+
+    These limits protect the application from excessively large
+    images and memory-intensive image processing.
+    """
+
+    IMAGE_MAX_WIDTH: int = 4096
+
+    IMAGE_MAX_HEIGHT: int = 4096
+
+    """
+    Maximum total number of decoded pixels.
+
+    Default:
+        16 megapixels
+
+    This is an additional protection against decompression-bomb
+    style payloads.
+    """
+
+    IMAGE_MAX_PIXELS: int = 16 * 1024 * 1024
+
+    """
+    Formats accepted by the image-upload service.
+
+    Only formats that can be safely decoded and re-encoded by
+    Pillow should be accepted.
+
+    SVG is intentionally excluded because it can contain active
+    content and should not be treated as an ordinary image upload.
+    """
+
+    IMAGE_ALLOWED_FORMATS: str = "JPEG,PNG,WEBP"
+
+    # ========================================================================
     # CORS
     # ========================================================================
 

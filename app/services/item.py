@@ -1,83 +1,55 @@
 """
 TRACKIT Item Service.
 
-Business logic for creating, retrieving, updating,
-deleting, and administratively moderating lost and
-found items.
-
-Architecture:
-
-    Router
-        ↓
-    Schema / Validation
-        ↓
-    Service / Business Rules
-        ↓
-    Repository / Database Access
-        ↓
-    Model
-
-Security principles:
-
-- Item ownership is based on the authenticated user.
-- Clients cannot choose another user's identity.
-- Only valid item types may be created or updated.
-- New items always begin as pending.
-- Only pending items may be approved or rejected.
-- Rejection requires a reason.
-- Administrator actions are audited.
-- Item moderation events generate user notifications.
-- Matching is generated only after an item is approved.
-- Qualifying matches generate notifications for the involved users.
-- Matching does not automatically create claims.
+Business logic for item creation, retrieval, updates,
+deletion, and moderation.
 """
+
+from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
 from app.models.item import Item
-
 from app.repositories.items import (
+    IMAGE_UNSET,
     create_item as repository_create_item,
     delete_item as repository_delete_item,
-    get_item_by_id,
-    get_items,
-    get_items_by_user,
+    get_item_by_id as repository_get_item_by_id,
+    get_items as repository_get_items,
+    get_items_by_user as repository_get_items_by_user,
+    get_public_items as repository_get_public_items,
     update_item as repository_update_item,
     update_item_status as repository_update_item_status,
 )
-
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
 )
-
-from app.services.match import (
-    generate_matches_for_item,
-)
-
+from app.services.match import generate_matches_for_item
 from app.services.notification import (
     NOTIFICATION_ITEM_APPROVED,
-    NOTIFICATION_ITEM_REJECTED,
     create_notification,
     notify_match_found,
 )
+from app.utils.images import ImageUploadError, delete_stored_image
 
 
-# ============================================================================
-# ITEM STATUS
-# ============================================================================
+def _delete_stored_image_safely(
+    storage_key: str | None,
+) -> None:
+    """
+    Best-effort cleanup for a stored image.
 
-ITEM_STATUS_PENDING = "pending"
-ITEM_STATUS_APPROVED = "approved"
-ITEM_STATUS_REJECTED = "rejected"
-ITEM_STATUS_CLAIMED = "claimed"
+    Cleanup failures must never hide the original application error.
+    """
 
-ITEM_MODERATABLE_STATUS = ITEM_STATUS_PENDING
+    if not storage_key:
+        return
 
-
-# ============================================================================
-# CREATE
-# ============================================================================
+    try:
+        delete_stored_image(storage_key)
+    except ImageUploadError:
+        pass
 
 
 def create_item(
@@ -92,19 +64,14 @@ def create_item(
     image: str | None = None,
 ) -> Item:
     """
-    Create a new TRACKIT item.
+    Create a new item.
 
-    Business rules:
-
-    - Item type must be either 'lost' or 'found'.
-    - New items always begin with pending status.
-    - Persistence is delegated to the repository.
+    Newly-created items begin in the repository/model's default
+    moderation state.
     """
 
     if item_type not in {"lost", "found"}:
-        raise ValueError(
-            "Item type must be 'lost' or 'found'."
-        )
+        raise ValueError("Item type must be 'lost' or 'found'.")
 
     return repository_create_item(
         db,
@@ -118,29 +85,77 @@ def create_item(
     )
 
 
-# ============================================================================
-# READ — SINGLE ITEM
-# ============================================================================
-
-
 def get_item(
     db: Session,
     *,
     item_id: int,
 ) -> Item | None:
-    """
-    Retrieve an item by ID.
-    """
+    """Return an item by ID."""
 
-    return get_item_by_id(
+    return repository_get_item_by_id(
         db,
         item_id,
     )
 
 
-# ============================================================================
-# READ — ALL ITEMS
-# ============================================================================
+def get_public_item(
+    db: Session,
+    *,
+    item_id: int,
+) -> Item | None:
+    """
+    Return an item only when it is publicly visible.
+
+    Pending and rejected items are never exposed through the public
+    item lookup.
+    """
+
+    item = repository_get_item_by_id(
+        db,
+        item_id,
+    )
+
+    if item is None:
+        return None
+
+    if item.status not in {"approved", "claimed"}:
+        return None
+
+    return item
+
+
+def list_public_items(
+    db: Session,
+    *,
+    search: str | None = None,
+    item_type: str | None = None,
+    category: str | None = None,
+    location: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> list[Item]:
+    """Return paginated publicly visible items."""
+
+    if page < 1:
+        raise ValueError("Page must be at least 1.")
+
+    if limit < 1:
+        raise ValueError("Limit must be at least 1.")
+
+    if limit > 100:
+        raise ValueError("Limit must not exceed 100.")
+
+    offset = (page - 1) * limit
+
+    return repository_get_public_items(
+        db,
+        search=search,
+        item_type=item_type,
+        category=category,
+        location=location,
+        offset=offset,
+        limit=limit,
+    )
 
 
 def list_items(
@@ -154,26 +169,20 @@ def list_items(
     page: int = 1,
     limit: int = 20,
 ) -> list[Item]:
-    """
-    Retrieve items with optional filtering and pagination.
-
-    Pagination is handled at the service boundary while
-    actual database querying remains in the repository.
-    """
+    """Return paginated items for administrative/internal use."""
 
     if page < 1:
-        raise ValueError(
-            "Page must be greater than or equal to 1."
-        )
+        raise ValueError("Page must be at least 1.")
 
-    if limit < 1 or limit > 100:
-        raise ValueError(
-            "Limit must be between 1 and 100."
-        )
+    if limit < 1:
+        raise ValueError("Limit must be at least 1.")
+
+    if limit > 100:
+        raise ValueError("Limit must not exceed 100.")
 
     offset = (page - 1) * limit
 
-    return get_items(
+    return repository_get_items(
         db,
         search=search,
         item_type=item_type,
@@ -185,32 +194,80 @@ def list_items(
     )
 
 
-# ============================================================================
-# READ — USER ITEMS
-# ============================================================================
-
-
 def list_user_items(
     db: Session,
     *,
     user_id: int,
 ) -> list[Item]:
-    """
-    Retrieve all items belonging to a specific user.
+    """Return all items owned by a user."""
 
-    The caller is responsible for ensuring that user_id
-    represents the authenticated user.
-    """
-
-    return get_items_by_user(
+    return repository_get_items_by_user(
         db,
         user_id=user_id,
     )
 
 
-# ============================================================================
-# UPDATE
-# ============================================================================
+def list_items_for_admin(
+    db: Session,
+    *,
+    search: str | None = None,
+    item_type: str | None = None,
+    category: str | None = None,
+    location: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> list[Item]:
+    """Return paginated items for administrator review."""
+
+    return list_items(
+        db,
+        search=search,
+        item_type=item_type,
+        category=category,
+        location=location,
+        status=status,
+        page=page,
+        limit=limit,
+    )
+
+
+def _has_substantive_change(
+    item: Item,
+    *,
+    title: str | None,
+    description: str | None,
+    item_type: str | None,
+    category: str | None,
+    location: str | None,
+    image: str | None | object,
+) -> bool:
+    """
+    Determine whether an update changes information that requires
+    moderation again.
+
+    IMAGE_UNSET means that the image field was not supplied.
+    """
+
+    if title is not None and title != item.title:
+        return True
+
+    if description is not None and description != item.description:
+        return True
+
+    if item_type is not None and item_type != item.type:
+        return True
+
+    if category is not None and category != item.category:
+        return True
+
+    if location is not None and location != item.location:
+        return True
+
+    if image is not IMAGE_UNSET and image != item.image:
+        return True
+
+    return False
 
 
 def update_item(
@@ -223,32 +280,46 @@ def update_item(
     item_type: str | None = None,
     category: str | None = None,
     location: str | None = None,
-    image: str | None = None,
+    image: str | None | object = IMAGE_UNSET,
 ) -> Item:
     """
-    Update an item belonging to the authenticated user.
+    Update an item owned by the current user.
 
-    Business rules:
+    Substantive changes to approved or rejected items return the item
+    to pending moderation and clear previous moderation metadata.
 
-    - Only the item owner may modify the item.
-    - Item type, when supplied, must be 'lost' or 'found'.
-    - Unspecified fields remain unchanged.
+    Claimed items cannot be modified.
     """
 
     if item.user_id != user_id:
         raise PermissionError(
-            "You are not authorized to modify this item."
+            "You are not authorized to update this item."
         )
 
-    if item_type is not None and item_type not in {
-        "lost",
-        "found",
-    }:
+    if item.status == "claimed":
+        raise PermissionError(
+            "Claimed items cannot be modified."
+        )
+
+    if item_type is not None and item_type not in {"lost", "found"}:
         raise ValueError(
             "Item type must be 'lost' or 'found'."
         )
 
-    return repository_update_item(
+    substantive_change = _has_substantive_change(
+        item,
+        title=title,
+        description=description,
+        item_type=item_type,
+        category=category,
+        location=location,
+        image=image,
+    )
+
+    old_image = item.image
+    previous_status = item.status
+
+    updated_item = repository_update_item(
         db,
         item,
         title=title,
@@ -259,10 +330,27 @@ def update_item(
         image=image,
     )
 
+    if (
+        substantive_change
+        and previous_status in {"approved", "rejected"}
+    ):
+        updated_item = repository_update_item_status(
+            db,
+            updated_item,
+            status="pending",
+            rejection_reason=None,
+            reviewed_by=None,
+            reviewed_at=None,
+        )
 
-# ============================================================================
-# DELETE
-# ============================================================================
+    if (
+        image is not IMAGE_UNSET
+        and image != old_image
+        and old_image is not None
+    ):
+        _delete_stored_image_safely(old_image)
+
+    return updated_item
 
 
 def delete_item(
@@ -272,9 +360,7 @@ def delete_item(
     user_id: int,
 ) -> None:
     """
-    Delete an item belonging to the authenticated user.
-
-    Ownership authorization is enforced by the service layer.
+    Delete an item owned by the current user.
     """
 
     if item.user_id != user_id:
@@ -282,173 +368,191 @@ def delete_item(
             "You are not authorized to delete this item."
         )
 
+    stored_image = item.image
+
     repository_delete_item(
         db,
         item,
     )
 
+    _delete_stored_image_safely(stored_image)
 
-# ============================================================================
-# MODERATION — APPROVE
-# ============================================================================
+
+def _resolve_reviewer_id(
+    *,
+    reviewer_id: int | None,
+    admin_user_id: int | None,
+) -> int:
+    """
+    Resolve the administrator ID used for moderation.
+
+    reviewer_id is the preferred name. admin_user_id is retained as a
+    compatibility alias for existing callers.
+    """
+
+    if (
+        reviewer_id is not None
+        and admin_user_id is not None
+        and reviewer_id != admin_user_id
+    ):
+        raise ValueError(
+            "reviewer_id and admin_user_id must refer to the same administrator."
+        )
+
+    resolved_id = (
+        reviewer_id
+        if reviewer_id is not None
+        else admin_user_id
+    )
+
+    if resolved_id is None:
+        raise ValueError(
+            "A reviewer_id is required."
+        )
+
+    return resolved_id
 
 
 def approve_item(
     db: Session,
     *,
     item: Item,
-    reviewer_id: int,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
+    reviewer_id: int | None = None,
+    admin_user_id: int | None = None,
 ) -> Item:
     """
     Approve a pending item.
 
-    Business rules:
+    Approval performs the complete moderation workflow:
 
-    - Only pending items may be approved.
-    - Reviewer identity comes from the authenticated administrator.
-    - Approval changes the item status to approved.
-    - Approved items trigger matching against approved opposite-type items.
-    - Qualifying matches generate notifications for the involved users.
-    - The approval action is audited.
-    - The item owner receives an approval notification.
+    1. Mark the item approved.
+    2. Record reviewer metadata.
+    3. Notify the item owner.
+    4. Write an administrator audit log.
+    5. Generate qualifying matches.
+    6. Notify the owners involved in those matches.
 
-    Matching does not create claims.
+    This function never creates a claim automatically.
     """
 
-    if item.status != ITEM_STATUS_PENDING:
+    if item.status != "pending":
         raise ValueError(
             "Only pending items can be approved."
         )
 
-    updated_item = repository_update_item_status(
+    resolved_reviewer_id = _resolve_reviewer_id(
+        reviewer_id=reviewer_id,
+        admin_user_id=admin_user_id,
+    )
+
+    reviewed_at = datetime.now(timezone.utc)
+
+    approved_item = repository_update_item_status(
         db,
         item,
-        status=ITEM_STATUS_APPROVED,
+        status="approved",
+        rejection_reason=None,
+        reviewed_by=resolved_reviewer_id,
+        reviewed_at=reviewed_at,
     )
 
-    # Generate potential matches only after the item becomes approved.
-    #
-    # This searches all approved items of the opposite type and persists
-    # qualifying matches through the matching service.
+    create_notification(
+        db,
+        user_id=approved_item.user_id,
+        notification_type=NOTIFICATION_ITEM_APPROVED,
+        title="Item Approved",
+        message=(
+            f'Your item "{approved_item.title}" '
+            "has been approved and is now visible to other users."
+        ),
+        entity_type="item",
+        entity_id=approved_item.id,
+    )
+
+    create_audit_log(
+        db,
+        event_type=AUDIT_ADMIN_ACTION,
+        success=True,
+        description=(
+            f"Item {approved_item.id} approved by administrator."
+        ),
+        user_id=resolved_reviewer_id,
+    )
+
     matches = generate_matches_for_item(
         db,
-        item=updated_item,
+        item=approved_item,
     )
 
-    # Notify the owners of each qualifying potential match.
-    #
-    # notify_match_found() handles:
-    # - the possible-match threshold
-    # - notifying both participating owners
-    # - same-user deduplication
-    # - per-user/match notification deduplication
-    #
-    # No claim is created automatically.
     for match in matches:
         notify_match_found(
             db,
             match=match,
         )
 
-    create_audit_log(
-        db,
-        event_type=AUDIT_ADMIN_ACTION,
-        success=True,
-        description=(
-            f"Item {item.id} approved by administrator."
-        ),
-        user_id=reviewer_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
-    )
-
-    create_notification(
-        db,
-        user_id=item.user_id,
-        notification_type=NOTIFICATION_ITEM_APPROVED,
-        title="Item approved",
-        message=(
-            f"Your {item.type} item "
-            f"\"{item.title}\" has been approved."
-        ),
-        entity_type="item",
-        entity_id=item.id,
-    )
-
-    return updated_item
-
-
-# ============================================================================
-# MODERATION — REJECT
-# ============================================================================
+    return approved_item
 
 
 def reject_item(
     db: Session,
     *,
     item: Item,
-    reviewer_id: int,
-    rejection_reason: str,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
+    reviewer_id: int | None = None,
+    admin_user_id: int | None = None,
+    rejection_reason: str | None = None,
+    reason: str | None = None,
 ) -> Item:
     """
     Reject a pending item.
 
-    Business rules:
-
-    - Only pending items may be rejected.
-    - Rejection requires a non-empty reason.
-    - Reviewer identity comes from the authenticated administrator.
-    - The rejection action is audited.
-    - The item owner receives a rejection notification.
+    rejection_reason is the preferred argument name. reason is retained
+    as a compatibility alias for existing callers.
     """
 
-    if item.status != ITEM_STATUS_PENDING:
+    if item.status != "pending":
         raise ValueError(
             "Only pending items can be rejected."
         )
 
-    normalized_reason = rejection_reason.strip()
+    resolved_reviewer_id = _resolve_reviewer_id(
+        reviewer_id=reviewer_id,
+        admin_user_id=admin_user_id,
+    )
 
-    if not normalized_reason:
+    if (
+        rejection_reason is not None
+        and reason is not None
+        and rejection_reason.strip() != reason.strip()
+    ):
         raise ValueError(
-            "Rejection reason cannot be empty."
+            "rejection_reason and reason must contain the same reason."
         )
 
-    updated_item = repository_update_item_status(
+    resolved_reason = (
+        rejection_reason
+        if rejection_reason is not None
+        else reason
+    )
+
+    if resolved_reason is None:
+        raise ValueError(
+            "Rejection reason is required."
+        )
+
+    resolved_reason = resolved_reason.strip()
+
+    if not resolved_reason:
+        raise ValueError(
+            "Rejection reason is required."
+        )
+
+    reviewed_at = datetime.now(timezone.utc)
+
+    return repository_update_item_status(
         db,
         item,
-        status=ITEM_STATUS_REJECTED,
+        status="rejected",
+        rejection_reason=resolved_reason,
+        reviewed_by=resolved_reviewer_id,
+        reviewed_at=reviewed_at,
     )
-
-    create_audit_log(
-        db,
-        event_type=AUDIT_ADMIN_ACTION,
-        success=True,
-        description=(
-            f"Item {item.id} rejected by administrator. "
-            f"Reason: {normalized_reason}"
-        ),
-        user_id=reviewer_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
-    )
-
-    create_notification(
-        db,
-        user_id=item.user_id,
-        notification_type=NOTIFICATION_ITEM_REJECTED,
-        title="Item rejected",
-        message=(
-            f"Your {item.type} item "
-            f"\"{item.title}\" was rejected. "
-            f"Reason: {normalized_reason}"
-        ),
-        entity_type="item",
-        entity_id=item.id,
-    )
-
-    return updated_item

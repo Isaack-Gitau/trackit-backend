@@ -45,10 +45,16 @@ from app.services.item import (
     list_user_items,
     reject_item,
     update_item,
+
 )
 from app.services.notification import (
     NOTIFICATION_ITEM_APPROVED,
     NOTIFICATION_MATCH_FOUND,
+)
+
+from app.repositories.items import (
+    get_items,
+    get_public_items,
 )
 
 
@@ -342,6 +348,387 @@ def test_list_user_items_returns_empty_for_user_without_items(db):
 
     assert results == []
 
+
+# ============================================================================
+# PUBLIC VISIBILITY
+# ============================================================================
+
+
+def test_get_public_items_returns_approved_items(db):
+    """
+    Public item queries should return approved items.
+    """
+
+    item = create_test_item(
+        db,
+        title="Approved Laptop",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=item,
+    )
+
+    results = get_public_items(db)
+
+    assert len(results) == 1
+    assert results[0].id == item.id
+    assert results[0].status == "approved"
+
+
+def test_get_public_items_returns_claimed_items(db):
+    """
+    Claimed items remain publicly visible.
+    """
+
+    item = create_test_item(
+        db,
+        title="Claimed Laptop",
+    )
+
+    item.status = "claimed"
+    db.flush()
+
+    results = get_public_items(db)
+
+    assert len(results) == 1
+    assert results[0].id == item.id
+    assert results[0].status == "claimed"
+
+
+def test_get_public_items_excludes_pending_items(db):
+    """
+    Pending items must never appear in the public query.
+    """
+
+    item = create_test_item(
+        db,
+        title="Pending Laptop",
+    )
+
+    assert item.status == "pending"
+
+    results = get_public_items(db)
+
+    assert results == []
+
+
+def test_get_public_items_excludes_rejected_items(db):
+    """
+    Rejected items must never appear in the public query.
+    """
+
+    item = create_test_item(
+        db,
+        title="Rejected Laptop",
+    )
+
+    item.status = "rejected"
+    db.flush()
+
+    results = get_public_items(db)
+
+    assert results == []
+
+
+def test_get_public_items_returns_only_public_statuses(db):
+    """
+    A mixture of moderation states should return only approved
+    and claimed items.
+    """
+
+    approved = create_test_item(
+        db,
+        title="Approved Item",
+    )
+
+    claimed = create_test_item(
+        db,
+        title="Claimed Item",
+    )
+
+    pending = create_test_item(
+        db,
+        title="Pending Item",
+    )
+
+    rejected = create_test_item(
+        db,
+        title="Rejected Item",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=approved,
+    )
+
+    claimed.status = "claimed"
+    rejected.status = "rejected"
+    db.flush()
+
+    results = get_public_items(db)
+
+    result_ids = {item.id for item in results}
+
+    assert result_ids == {
+        approved.id,
+        claimed.id,
+    }
+
+    assert pending.id not in result_ids
+    assert rejected.id not in result_ids
+
+    assert all(
+        item.status in {"approved", "claimed"}
+        for item in results
+    )
+
+
+def test_get_public_items_filters_by_type(db):
+    """
+    Public queries should preserve item-type filtering.
+    """
+
+    approved_lost = create_test_item(
+        db,
+        item_type="lost",
+        title="Approved Lost Laptop",
+    )
+
+    approved_found = create_test_item(
+        db,
+        item_type="found",
+        title="Approved Found Laptop",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=approved_lost,
+    )
+
+    approve_test_item_directly(
+        db,
+        item=approved_found,
+    )
+
+    results = get_public_items(
+        db,
+        item_type="found",
+    )
+
+    assert len(results) == 1
+    assert results[0].id == approved_found.id
+    assert results[0].type == "found"
+
+
+def test_get_public_items_filters_by_category(db):
+    """
+    Public queries should preserve category filtering.
+    """
+
+    electronics = create_test_item(
+        db,
+        title="Approved Phone",
+        category="Electronics",
+    )
+
+    books = create_test_item(
+        db,
+        title="Approved Book",
+        category="Books",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=electronics,
+    )
+
+    approve_test_item_directly(
+        db,
+        item=books,
+    )
+
+    results = get_public_items(
+        db,
+        category="electronics",
+    )
+
+    assert len(results) == 1
+    assert results[0].id == electronics.id
+
+
+def test_get_public_items_filters_by_location(db):
+    """
+    Public queries should preserve location filtering.
+    """
+
+    library_item = create_test_item(
+        db,
+        title="Approved Library Laptop",
+        location="Main Library",
+    )
+
+    cafeteria_item = create_test_item(
+        db,
+        title="Approved Cafeteria Wallet",
+        location="Cafeteria",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=library_item,
+    )
+
+    approve_test_item_directly(
+        db,
+        item=cafeteria_item,
+    )
+
+    results = get_public_items(
+        db,
+        location="main library",
+    )
+
+    assert len(results) == 1
+    assert results[0].id == library_item.id
+
+
+def test_get_public_items_searches_only_public_items(db):
+    """
+    Search results must not expose pending or rejected items,
+    even when those items match the search term.
+    """
+
+    approved = create_test_item(
+        db,
+        title="Approved Black Laptop",
+        description="Black laptop available.",
+    )
+
+    pending = create_test_item(
+        db,
+        title="Pending Black Laptop",
+        description="Black laptop awaiting review.",
+    )
+
+    rejected = create_test_item(
+        db,
+        title="Rejected Black Laptop",
+        description="Black laptop submission rejected.",
+    )
+
+    approve_test_item_directly(
+        db,
+        item=approved,
+    )
+
+    rejected.status = "rejected"
+    db.flush()
+
+    results = get_public_items(
+        db,
+        search="black laptop",
+    )
+
+    assert len(results) == 1
+    assert results[0].id == approved.id
+
+    result_ids = {item.id for item in results}
+
+    assert pending.id not in result_ids
+    assert rejected.id not in result_ids
+
+
+def test_get_public_items_paginates_approved_and_claimed_items_together(
+    db,
+):
+    """
+    Pagination must operate over the combined public dataset,
+    rather than separately paginating approved and claimed items.
+    """
+
+    items = []
+
+    for number in range(5):
+        item = create_test_item(
+            db,
+            title=f"Public Item {number}",
+        )
+
+        if number == 4:
+            item.status = "claimed"
+            db.flush()
+        else:
+            approve_test_item_directly(
+                db,
+                item=item,
+            )
+
+        items.append(item)
+
+    first_page = get_public_items(
+        db,
+        offset=0,
+        limit=2,
+    )
+
+    second_page = get_public_items(
+        db,
+        offset=2,
+        limit=2,
+    )
+
+    third_page = get_public_items(
+        db,
+        offset=4,
+        limit=2,
+    )
+
+    assert len(first_page) == 2
+    assert len(second_page) == 2
+    assert len(third_page) == 1
+
+    first_ids = {item.id for item in first_page}
+    second_ids = {item.id for item in second_page}
+    third_ids = {item.id for item in third_page}
+
+    assert first_ids.isdisjoint(second_ids)
+    assert first_ids.isdisjoint(third_ids)
+    assert second_ids.isdisjoint(third_ids)
+
+    all_public_ids = first_ids | second_ids | third_ids
+
+    assert all_public_ids == {
+        item.id
+        for item in items
+    }
+
+
+def test_get_items_remains_unrestricted_for_internal_use(db):
+    """
+    The generic repository query must remain capable of retrieving
+    non-public moderation states for internal/admin workflows.
+    """
+
+    pending = create_test_item(
+        db,
+        title="Pending Internal Item",
+    )
+
+    rejected = create_test_item(
+        db,
+        title="Rejected Internal Item",
+    )
+
+    rejected.status = "rejected"
+    db.flush()
+
+    results = get_items(db)
+
+    result_ids = {item.id for item in results}
+
+    assert pending.id in result_ids
+    assert rejected.id in result_ids
 
 # ============================================================================
 # SEARCH

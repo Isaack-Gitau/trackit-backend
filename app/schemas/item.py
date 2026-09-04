@@ -2,7 +2,7 @@
 TRACKIT Item Schemas.
 
 Pydantic schemas used for validating item creation,
-updates, filtering, and API responses.
+updates, filtering, moderation, and API responses.
 """
 
 from datetime import datetime
@@ -47,11 +47,17 @@ class ItemBase(BaseModel):
         max_length=255,
     )
 
-    @field_validator("title", "description", "category", "location")
+    @field_validator(
+        "title",
+        "description",
+        "category",
+        "location",
+    )
     @classmethod
     def strip_whitespace(cls, value: str) -> str:
         """
-        Remove unnecessary leading/trailing whitespace.
+        Remove unnecessary leading/trailing whitespace
+        and reject empty values.
         """
         value = value.strip()
 
@@ -68,7 +74,11 @@ class ItemBase(BaseModel):
 
 class ItemCreate(ItemBase):
     """
-    Data required to create a lost/found item.
+    Validated item data used after multipart/form-data fields
+    have been parsed by the API layer.
+
+    The actual uploaded image is handled separately through
+    FastAPI's UploadFile mechanism.
     """
 
     image: str | None = Field(
@@ -87,6 +97,10 @@ class ItemUpdate(BaseModel):
     Fields that may be changed by the item owner.
 
     All fields are optional because PATCH semantics are used.
+
+    The image value represents the existing stored image key
+    when applicable. Actual uploaded files are handled separately
+    by the API layer.
     """
 
     title: str | None = Field(
@@ -127,7 +141,10 @@ class ItemUpdate(BaseModel):
         "location",
     )
     @classmethod
-    def strip_optional_whitespace(cls, value: str | None) -> str | None:
+    def strip_optional_whitespace(
+        cls,
+        value: str | None,
+    ) -> str | None:
         """
         Normalize optional string fields.
         """
@@ -140,7 +157,6 @@ class ItemUpdate(BaseModel):
             raise ValueError("Field cannot be empty.")
 
         return value
-
 
 
 # ============================================================================
@@ -167,7 +183,6 @@ class ItemReject(BaseModel):
         """
         Normalize and validate the rejection reason.
         """
-
         value = value.strip()
 
         if not value:
@@ -177,6 +192,7 @@ class ItemReject(BaseModel):
 
         return value
 
+
 # ============================================================================
 # ITEM RESPONSE
 # ============================================================================
@@ -185,6 +201,9 @@ class ItemReject(BaseModel):
 class ItemResponse(BaseModel):
     """
     Public API representation of an item.
+
+    The image field contains a public media URL when an image
+    exists, not the internal filesystem path.
     """
 
     model_config = ConfigDict(
@@ -253,7 +272,11 @@ class ItemListParams(BaseModel):
         le=100,
     )
 
-    @field_validator("search", "category", "location")
+    @field_validator(
+        "search",
+        "category",
+        "location",
+    )
     @classmethod
     def normalize_filters(
         cls,

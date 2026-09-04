@@ -42,3 +42,6 @@ dist/
 # Temporary files
 *.tmp
 *.temp
+
+# User-uploaded media
+storage/media/

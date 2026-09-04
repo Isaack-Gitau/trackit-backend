@@ -1,4 +1,3 @@
-
 """
 TRACKIT Item API Routes.
 
@@ -14,6 +13,8 @@ Architecture:
         ↓
     Pydantic Validation
         ↓
+    Image Sanitization / Storage
+        ↓
     Item Service
         ↓
     Item Repository
@@ -25,36 +26,59 @@ Security principles:
 - Clients cannot provide or override user_id.
 - Verified accounts are required for item management.
 - Ownership checks remain in the service layer.
-- Public item browsing does not expose private account data.
-- Request parameters are validated before reaching business logic.
+- Public item browsing exposes only publicly visible items.
+- Pending and rejected items are not publicly accessible.
+- Uploaded images are validated and sanitized server-side.
+- Clients cannot choose the image storage path.
+- Stored images use server-generated storage keys.
+- Failed database operations clean up newly stored images.
+- JSON image values are never treated as storage paths.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from typing import Any
+
+from starlette.datastructures import UploadFile
+
+from fastapi import (
+    APIRouter,
+    Depends,
+    File,
+    Form,
+    HTTPException,
+    Query,
+    Request,
+    status,
+)
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
     get_current_admin,
     get_current_verified_user,
 )
-
 from app.db.dependencies import get_db
 from app.models.user import User
+from app.repositories.items import IMAGE_UNSET
 from app.schemas.item import (
     ItemCreate,
     ItemReject,
     ItemResponse,
     ItemUpdate,
-
 )
 from app.services.item import (
     approve_item,
     create_item,
     delete_item,
     get_item,
-    list_items,
+    get_public_item,
+    list_public_items,
     list_user_items,
     reject_item,
     update_item,
+)
+from app.utils.images import (
+    ImageUploadError,
+    delete_stored_image,
+    sanitize_and_store_image,
 )
 
 
@@ -62,6 +86,231 @@ router = APIRouter(
     prefix="/items",
     tags=["Items"],
 )
+
+
+# ============================================================================
+# HELPERS
+# ============================================================================
+
+
+def _delete_stored_image_safely(
+    storage_key: str | None,
+) -> None:
+    """
+    Best-effort cleanup for an image that was newly stored during
+    a request but could not be associated with the database record.
+    """
+    if not storage_key:
+        return
+
+    try:
+        delete_stored_image(storage_key)
+    except Exception:
+        # Cleanup must never hide the original request/database error.
+        pass
+
+
+async def _parse_create_request(
+    request: Request,
+) -> tuple[ItemCreate, UploadFile | None]:
+    """
+    Parse an item creation request.
+
+    Supported content types:
+
+        application/json
+            Normal item creation without an uploaded image.
+
+        multipart/form-data
+            Item creation with optional image upload.
+
+    JSON image values are deliberately rejected because clients must
+    not be able to provide arbitrary filesystem storage keys or URLs.
+    """
+    content_type = request.headers.get("content-type", "").lower()
+
+    if content_type.startswith("application/json"):
+        try:
+            payload_data = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid JSON request body.",
+            ) from exc
+
+        if not isinstance(payload_data, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Request body must be a JSON object.",
+            )
+
+        if "image" in payload_data and payload_data["image"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Images must be uploaded using multipart/form-data.",
+            )
+
+        try:
+            payload = ItemCreate.model_validate(payload_data)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        return payload, None
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+
+        try:
+            payload = ItemCreate(
+                title=form.get("title"),
+                description=form.get("description"),
+                type=form.get("type"),
+                category=form.get("category"),
+                location=form.get("location"),
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        image_value = form.get("image")
+
+        if image_value is None:
+            return payload, None
+
+        if not isinstance(image_value, UploadFile):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The image field must be a file.",
+            )
+
+        return payload, image_value
+
+    raise HTTPException(
+        status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        detail=(
+            "Unsupported content type. "
+            "Use application/json or multipart/form-data."
+        ),
+    )
+
+
+async def _parse_update_request(
+    request: Request,
+) -> tuple[ItemUpdate, UploadFile | None, bool]:
+    """
+    Parse an item update request.
+
+    Supported content types:
+
+        application/json
+            Normal text-only update.
+
+        multipart/form-data
+            Text update with optional image replacement/removal.
+
+    Returns:
+
+        (validated payload, uploaded image, remove_image)
+    """
+    content_type = request.headers.get("content-type", "").lower()
+
+    if content_type.startswith("application/json"):
+        try:
+            payload_data = await request.json()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Invalid JSON request body.",
+            ) from exc
+
+        if not isinstance(payload_data, dict):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Request body must be a JSON object.",
+            )
+
+        if "image" in payload_data and payload_data["image"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Images must be uploaded using multipart/form-data.",
+            )
+
+        if "remove_image" in payload_data and payload_data["remove_image"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Image removal must use multipart/form-data.",
+            )
+
+        try:
+            payload = ItemUpdate.model_validate(payload_data)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        return payload, None, False
+
+    if content_type.startswith("multipart/form-data"):
+        form = await request.form()
+
+        payload_data: dict[str, Any] = {}
+
+        for field_name in (
+            "title",
+            "description",
+            "type",
+            "category",
+            "location",
+        ):
+            if field_name in form:
+                payload_data[field_name] = form.get(field_name)
+
+        try:
+            payload = ItemUpdate.model_validate(payload_data)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            ) from exc
+
+        image_value = form.get("image")
+
+        if image_value is not None and not isinstance(
+            image_value,
+            UploadFile,
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="The image field must be a file.",
+            )
+
+        remove_image_value = form.get("remove_image", False)
+
+        if isinstance(remove_image_value, str):
+            remove_image = remove_image_value.strip().lower() in {
+                "true",
+                "1",
+                "yes",
+                "on",
+            }
+        else:
+            remove_image = bool(remove_image_value)
+
+        return payload, image_value, remove_image
+
+    raise HTTPException(
+        status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+        detail=(
+            "Unsupported content type. "
+            "Use application/json or multipart/form-data."
+        ),
+    )
 
 
 # ============================================================================
@@ -75,40 +324,63 @@ router = APIRouter(
     status_code=status.HTTP_201_CREATED,
     summary="Create a lost or found item",
 )
-def create_item_endpoint(
-    payload: ItemCreate,
+async def create_item_endpoint(
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user),
 ):
     """
     Create a new lost or found item.
 
+    Supports:
+
+    - application/json for normal item creation
+    - multipart/form-data when an image is uploaded
+
     The authenticated user automatically becomes the owner.
 
-    user_id is deliberately NOT accepted from the request body.
+    user_id is deliberately NOT accepted as an authority source.
     """
 
-    return create_item(
-        db,
-        user_id=current_user.id,
-        title=payload.title,
-        description=payload.description,
-        item_type=payload.type,
-        category=payload.category,
-        location=payload.location,
-        image=payload.image,
-    )
+    payload, image = await _parse_create_request(request)
+
+    stored_image: str | None = None
+
+    try:
+        if image is not None:
+            stored_image = sanitize_and_store_image(image.file)
+
+        return create_item(
+            db,
+            user_id=current_user.id,
+            title=payload.title,
+            description=payload.description,
+            item_type=payload.type,
+            category=payload.category,
+            location=payload.location,
+            image=stored_image,
+        )
+
+    except ImageUploadError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        _delete_stored_image_safely(stored_image)
+        raise
 
 
 # ============================================================================
-# LIST ITEMS
+# LIST PUBLIC ITEMS
 # ============================================================================
 
 
 @router.get(
     "",
     response_model=list[ItemResponse],
-    summary="List lost and found items",
+    summary="List publicly visible lost and found items",
 )
 def list_items_endpoint(
     search: str | None = Query(
@@ -132,12 +404,6 @@ def list_items_endpoint(
         max_length=255,
         description="Filter by location.",
     ),
-    item_status: str | None = Query(
-        default=None,
-        alias="status",
-        pattern="^(pending|approved|rejected)$",
-        description="Filter by moderation status.",
-    ),
     page: int = Query(
         default=1,
         ge=1,
@@ -152,20 +418,17 @@ def list_items_endpoint(
     db: Session = Depends(get_db),
 ):
     """
-    Retrieve lost/found items with filtering and pagination.
+    Retrieve publicly visible lost/found items.
 
-    Browsing items is public.
-
-    Authentication is not required for this endpoint.
+    Public browsing is restricted to approved and claimed items.
     """
 
-    return list_items(
+    return list_public_items(
         db,
         search=search,
         item_type=item_type,
         category=category,
         location=location,
-        status=item_status,
         page=page,
         limit=limit,
     )
@@ -187,8 +450,6 @@ def list_my_items_endpoint(
 ):
     """
     Retrieve all items belonging to the authenticated user.
-
-    The user identity comes from the authenticated JWT.
     """
 
     return list_user_items(
@@ -198,7 +459,7 @@ def list_my_items_endpoint(
 
 
 # ============================================================================
-# ADMIN MODERATION
+# ADMIN MODERATION — APPROVE
 # ============================================================================
 
 
@@ -233,20 +494,25 @@ def approve_item_endpoint(
         return approve_item(
             db,
             item=item,
-            reviewer_id=current_admin.id,
+            admin_user_id=current_admin.id,
         )
 
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
-        )
+        ) from exc
+
+
+# ============================================================================
+# ADMIN MODERATION — REJECT
+# ============================================================================
 
 
 @router.patch(
     "/{item_id}/reject",
     response_model=ItemResponse,
-    summary="Reject an item",
+    summary="Reject a pending item",
 )
 def reject_item_endpoint(
     item_id: int,
@@ -276,35 +542,38 @@ def reject_item_endpoint(
         return reject_item(
             db,
             item=item,
-            reviewer_id=current_admin.id,
-            rejection_reason=payload.reason,
+            admin_user_id=current_admin.id,
+            reason=payload.reason,
         )
 
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
-        )
+        ) from exc
+
 
 # ============================================================================
-# GET SINGLE ITEM
+# GET SINGLE PUBLIC ITEM
 # ============================================================================
 
 
 @router.get(
     "/{item_id}",
     response_model=ItemResponse,
-    summary="Get an item",
+    summary="Get a publicly visible item",
 )
 def get_item_endpoint(
     item_id: int,
     db: Session = Depends(get_db),
 ):
     """
-    Retrieve a single item by ID.
+    Retrieve a publicly visible item by ID.
+
+    Only approved and claimed items are exposed.
     """
 
-    item = get_item(
+    item = get_public_item(
         db,
         item_id=item_id,
     )
@@ -328,16 +597,20 @@ def get_item_endpoint(
     response_model=ItemResponse,
     summary="Update an owned item",
 )
-def update_item_endpoint(
+async def update_item_endpoint(
     item_id: int,
-    payload: ItemUpdate,
+    request: Request,
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user),
 ):
     """
     Update an item belonging to the authenticated user.
 
-    Ownership authorization is enforced by the service layer.
+    Supports:
+
+    - application/json for text-only updates
+    - multipart/form-data for text updates with image replacement
+    - multipart/form-data with remove_image=true to clear an image
     """
 
     item = get_item(
@@ -351,7 +624,21 @@ def update_item_endpoint(
             detail="Item not found.",
         )
 
+    payload, image, remove_image = await _parse_update_request(
+        request,
+    )
+
+    image_storage_key: str | None | object = IMAGE_UNSET
+    stored_image: str | None = None
+
     try:
+        if image is not None:
+            stored_image = sanitize_and_store_image(image.file)
+            image_storage_key = stored_image
+
+        elif remove_image:
+            image_storage_key = None
+
         return update_item(
             db,
             item=item,
@@ -361,20 +648,36 @@ def update_item_endpoint(
             item_type=payload.type,
             category=payload.category,
             location=payload.location,
-            image=payload.image,
+            image=image_storage_key,
         )
 
-    except PermissionError:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to modify this item.",
-        )
+    except ImageUploadError as exc:
+        _delete_stored_image_safely(stored_image)
 
-    except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
-        )
+        ) from exc
+
+    except PermissionError as exc:
+        _delete_stored_image_safely(stored_image)
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to modify this item.",
+        ) from exc
+
+    except ValueError as exc:
+        _delete_stored_image_safely(stored_image)
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        _delete_stored_image_safely(stored_image)
+        raise
 
 
 # ============================================================================
@@ -395,7 +698,8 @@ def delete_item_endpoint(
     """
     Delete an item belonging to the authenticated user.
 
-    Ownership authorization is enforced by the service layer.
+    The service layer handles ownership validation and stored-image
+    cleanup.
     """
 
     item = get_item(
@@ -416,11 +720,10 @@ def delete_item_endpoint(
             user_id=current_user.id,
         )
 
-    except PermissionError:
+    except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not authorized to delete this item.",
-        )
+        ) from exc
 
     return None
-
