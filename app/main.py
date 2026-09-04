@@ -39,6 +39,7 @@ from app.middleware.security import configure_security_middleware
 from app.routers.api import router as api_router
 from app.routers.auth import router as auth_router
 from app.routers.claims import router as claims_router
+from app.routers.comments import router as comments_router
 from app.routers.items import router as items_router
 from app.routers.matches import router as matches_router
 from app.routers.notifications import router as notifications_router
@@ -91,6 +92,15 @@ app.include_router(
 
 app.include_router(
     claims_router,
+    prefix="/api",
+)
+
+# ============================================================================
+# COMMENT API
+# ============================================================================
+
+app.include_router(
+    comments_router,
     prefix="/api",
 )
 

@@ -50,6 +50,7 @@ from app.models import (
     Report,
     Notification,
     Match,
+    Comment,
 )
 
 

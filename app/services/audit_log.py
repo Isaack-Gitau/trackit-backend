@@ -48,6 +48,11 @@ AUDIT_ITEM_DELETED = "item_deleted"
 AUDIT_CLAIM_CREATED = "claim_created"
 AUDIT_CLAIM_UPDATED = "claim_updated"
 
+AUDIT_COMMENT_CREATED = "comment_created"
+AUDIT_COMMENT_UPDATED = "comment_updated"
+AUDIT_COMMENT_DELETED = "comment_deleted"
+AUDIT_ADMIN_COMMENT_DELETED = "admin_comment_deleted"
+
 AUDIT_ADMIN_ACTION = "admin_action"
 
 
