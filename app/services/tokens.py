@@ -1,4 +1,3 @@
-
 """
 TRACKIT Authentication Token Service.
 
@@ -31,8 +30,10 @@ from __future__ import annotations
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 from sqlalchemy import select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.models.auth_token import AuthToken
@@ -164,7 +165,9 @@ def create_auth_token(
             "Invalid user ID."
         )
 
-    _validate_token_type(token_type)
+    _validate_token_type(
+        token_type
+    )
 
     if expires_minutes <= 0:
         raise ValueError(
@@ -309,8 +312,9 @@ def consume_token(
         )
     )
 
-    result = db.execute(
-        statement
+    result = cast(
+        CursorResult[Any],
+        db.execute(statement),
     )
 
     if result.rowcount != 1:
@@ -366,8 +370,9 @@ def invalidate_user_tokens(
         )
     )
 
-    result = db.execute(
-        statement
+    result = cast(
+        CursorResult[Any],
+        db.execute(statement),
     )
 
     return int(
@@ -418,8 +423,9 @@ def invalidate_all_user_tokens(
         )
     )
 
-    result = db.execute(
-        statement
+    result = cast(
+        CursorResult[Any],
+        db.execute(statement),
     )
 
     return int(

@@ -257,6 +257,8 @@ def update_user_profile_service(
     # NORMALIZE USERNAME
     # ========================================================================
 
+    normalized_username: str | None = None
+
     if "username" in changes:
         username = changes["username"]
 
@@ -265,9 +267,7 @@ def update_user_profile_service(
                 "Username must be a string."
             )
 
-        normalized_username = (
-            username.strip().lower()
-        )
+        normalized_username = username.strip().lower()
 
         if not normalized_username:
             raise ValueError(
@@ -280,6 +280,8 @@ def update_user_profile_service(
     # NORMALIZE EMAIL
     # ========================================================================
 
+    normalized_email: str | None = None
+
     if "email" in changes:
         email = changes["email"]
 
@@ -288,9 +290,7 @@ def update_user_profile_service(
                 "Email must be a string."
             )
 
-        normalized_email = (
-            email.strip().lower()
-        )
+        normalized_email = email.strip().lower()
 
         if not normalized_email:
             raise ValueError(
@@ -392,11 +392,11 @@ def update_user_profile_service(
     # USERNAME UNIQUENESS
     # ========================================================================
 
-    if "username" in changes:
+    if normalized_username is not None:
         existing_username_user = (
             get_user_by_username_excluding_id(
                 db,
-                changes["username"],
+                normalized_username,
                 user.id,
             )
         )
@@ -410,11 +410,11 @@ def update_user_profile_service(
     # EMAIL UNIQUENESS
     # ========================================================================
 
-    if "email" in changes:
+    if normalized_email is not None:
         existing_email_user = (
             get_user_by_email_excluding_id(
                 db,
-                changes["email"],
+                normalized_email,
                 user.id,
             )
         )
@@ -429,8 +429,8 @@ def update_user_profile_service(
     # ========================================================================
 
     email_changed = (
-        "email" in changes
-        and changes["email"] != user.email
+        normalized_email is not None
+        and normalized_email != user.email
     )
 
     # ========================================================================

@@ -1,3 +1,4 @@
+
 """
 TRACKIT Notification Repository.
 
@@ -17,8 +18,10 @@ Security principles:
 """
 
 from datetime import datetime, timezone
+from typing import Any, cast
 
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.engine import CursorResult
 from sqlalchemy.orm import Session
 
 from app.models.notification import Notification
@@ -272,9 +275,7 @@ def mark_all_notifications_as_read(
         )
     )
 
-    result = db.execute(statement)
-    db.flush()
-
+    result = cast(CursorResult[Any], db.execute(statement))
     return int(result.rowcount or 0)
 
 
@@ -324,9 +325,7 @@ def delete_selected_notifications(
         Notification.id.in_(notification_ids),
     )
 
-    result = db.execute(statement)
-    db.flush()
-
+    result = cast(CursorResult[Any], db.execute(statement))
     return int(result.rowcount or 0)
 
 
@@ -350,7 +349,6 @@ def delete_all_notifications_by_user(
         Notification.user_id == user_id,
     )
 
-    result = db.execute(statement)
-    db.flush()
+    result = cast(CursorResult[Any], db.execute(statement))
 
     return int(result.rowcount or 0)

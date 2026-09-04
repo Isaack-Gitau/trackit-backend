@@ -35,21 +35,18 @@ Security principles:
 - JSON image values are never treated as storage paths.
 """
 
-from typing import Any
-
-from starlette.datastructures import UploadFile
+from typing import Any, Literal
 
 from fastapi import (
     APIRouter,
     Depends,
-    File,
-    Form,
     HTTPException,
     Query,
     Request,
     status,
 )
 from sqlalchemy.orm import Session
+from starlette.datastructures import FormData, UploadFile
 
 from app.api.deps import (
     get_current_admin,
@@ -110,6 +107,166 @@ def _delete_stored_image_safely(
         pass
 
 
+def _get_required_form_text(
+    form: FormData,
+    field_name: str,
+) -> str:
+    """
+    Extract a required text field from multipart form data.
+
+    Starlette's FormData values may be either strings or UploadFile
+    objects. This helper narrows the value to str and rejects files
+    supplied where text is expected.
+    """
+    value = form.get(field_name)
+
+    if value is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"The {field_name} field is required.",
+        )
+
+    if isinstance(value, UploadFile):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"The {field_name} field must be text.",
+        )
+
+    return value
+
+
+def _get_optional_form_text(
+    form: FormData,
+    field_name: str,
+) -> str | None:
+    """
+    Extract an optional text field from multipart form data.
+
+    Returns None when the field is absent and rejects uploaded files
+    where text is expected.
+    """
+    value = form.get(field_name)
+
+    if value is None:
+        return None
+
+    if isinstance(value, UploadFile):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"The {field_name} field must be text.",
+        )
+
+    return value
+
+
+def _get_required_item_type(
+    form: FormData,
+) -> Literal["lost", "found"]:
+    """
+    Extract and validate the required item type from multipart form data.
+
+    The ItemCreate schema uses Literal["lost", "found"], so this helper
+    explicitly narrows the runtime string to the exact Literal type
+    expected by Pydantic and Pyright.
+    """
+    value = _get_required_form_text(
+        form,
+        "type",
+    )
+
+    if value == "lost":
+        return "lost"
+
+    if value == "found":
+        return "found"
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="The type field must be either 'lost' or 'found'.",
+    )
+
+
+def _get_optional_item_type(
+    form: FormData,
+) -> Literal["lost", "found"] | None:
+    """
+    Extract and validate an optional item type from multipart form data.
+    """
+    value = _get_optional_form_text(
+        form,
+        "type",
+    )
+
+    if value is None:
+        return None
+
+    if value == "lost":
+        return "lost"
+
+    if value == "found":
+        return "found"
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail="The type field must be either 'lost' or 'found'.",
+    )
+
+
+def _get_form_boolean(
+    form: FormData,
+    field_name: str,
+    default: bool = False,
+) -> bool:
+    """
+    Extract a boolean value from multipart form data.
+
+    Accepted true values:
+        true, 1, yes, on
+
+    Accepted false values:
+        false, 0, no, off
+
+    An omitted field uses the supplied default.
+    """
+    value = form.get(field_name)
+
+    if value is None:
+        return default
+
+    if isinstance(value, UploadFile):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"The {field_name} field must be text.",
+        )
+
+    normalized_value = value.strip().lower()
+
+    if normalized_value in {
+        "true",
+        "1",
+        "yes",
+        "on",
+    }:
+        return True
+
+    if normalized_value in {
+        "false",
+        "0",
+        "no",
+        "off",
+        "",
+    }:
+        return False
+
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        detail=(
+            f"The {field_name} field must be a boolean "
+            "(true/false, 1/0, yes/no, or on/off)."
+        ),
+    )
+
+
 async def _parse_create_request(
     request: Request,
 ) -> tuple[ItemCreate, UploadFile | None]:
@@ -165,11 +322,23 @@ async def _parse_create_request(
 
         try:
             payload = ItemCreate(
-                title=form.get("title"),
-                description=form.get("description"),
-                type=form.get("type"),
-                category=form.get("category"),
-                location=form.get("location"),
+                title=_get_required_form_text(
+                    form,
+                    "title",
+                ),
+                description=_get_required_form_text(
+                    form,
+                    "description",
+                ),
+                type=_get_required_item_type(form),
+                category=_get_required_form_text(
+                    form,
+                    "category",
+                ),
+                location=_get_required_form_text(
+                    form,
+                    "location",
+                ),
             )
         except ValueError as exc:
             raise HTTPException(
@@ -264,12 +433,17 @@ async def _parse_update_request(
         for field_name in (
             "title",
             "description",
-            "type",
             "category",
             "location",
         ):
             if field_name in form:
-                payload_data[field_name] = form.get(field_name)
+                payload_data[field_name] = _get_optional_form_text(
+                    form,
+                    field_name,
+                )
+
+        if "type" in form:
+            payload_data["type"] = _get_optional_item_type(form)
 
         try:
             payload = ItemUpdate.model_validate(payload_data)
@@ -290,17 +464,11 @@ async def _parse_update_request(
                 detail="The image field must be a file.",
             )
 
-        remove_image_value = form.get("remove_image", False)
-
-        if isinstance(remove_image_value, str):
-            remove_image = remove_image_value.strip().lower() in {
-                "true",
-                "1",
-                "yes",
-                "on",
-            }
-        else:
-            remove_image = bool(remove_image_value)
+        remove_image = _get_form_boolean(
+            form,
+            "remove_image",
+            default=False,
+        )
 
         return payload, image_value, remove_image
 

@@ -327,8 +327,8 @@ def _normalize_image(
     """
     Normalize an image before safe re-encoding.
 
-    The resulting image contains pixel data only. Original EXIF, ICC,
-    XMP, comments, thumbnails, and other metadata are not copied.
+    The resulting image contains pixel data only. Original EXIF, ICC, XMP,
+    comments, thumbnails, and other metadata are not copied.
     """
 
     output_format = _pillow_format(output_format)
@@ -508,12 +508,14 @@ def _save_sanitized_image(
     """
 
     normalized_format = _pillow_format(image_format)
+
     sanitized_image = _normalize_image(
         image,
         normalized_format,
     )
 
     directory = _items_directory()
+
     directory.mkdir(
         parents=True,
         exist_ok=True,
@@ -537,44 +539,33 @@ def _save_sanitized_image(
             temporary_path = _safe_storage_path(temporary_name)
 
             try:
-                save_kwargs: dict[str, object] = {
-                    "format": normalized_format,
-                }
-
                 if normalized_format == "JPEG":
-                    save_kwargs.update(
-                        {
-                            "quality": 90,
-                            "optimize": True,
-                        }
+                    sanitized_image.save(
+                        temporary_path,
+                        format=normalized_format,
+                        quality=90,
+                        optimize=True,
                     )
 
                 elif normalized_format == "WEBP":
-                    save_kwargs.update(
-                        {
-                            "quality": 90,
-                            "method": 6,
-                        }
+                    sanitized_image.save(
+                        temporary_path,
+                        format=normalized_format,
+                        quality=90,
+                        method=6,
                     )
 
                 elif normalized_format == "PNG":
-                    save_kwargs.update(
-                        {
-                            "optimize": True,
-                        }
+                    sanitized_image.save(
+                        temporary_path,
+                        format=normalized_format,
+                        optimize=True,
                     )
 
-                # Deliberately do not pass:
-                # - EXIF
-                # - ICC
-                # - XMP
-                # - comments
-                # - thumbnails
-                # - arbitrary metadata
-                sanitized_image.save(
-                    temporary_path,
-                    **save_kwargs,
-                )
+                else:
+                    raise ImageFormatError(
+                        f"Unsupported image format: {normalized_format}"
+                    )
 
                 # The generated destination name is random. Replacing
                 # an existing file is therefore extremely unlikely.
@@ -584,6 +575,16 @@ def _save_sanitized_image(
                     f"items/{filename}",
                     destination,
                 )
+
+            except ImageFormatError:
+                try:
+                    temporary_path.unlink(
+                        missing_ok=True
+                    )
+                except OSError:
+                    pass
+
+                raise
 
             except Exception as exc:
                 try:

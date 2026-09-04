@@ -36,13 +36,17 @@ class Settings(BaseSettings):
     # Database
     # ========================================================================
 
-    DATABASE_URL: str
+    # Supplied through DATABASE_URL environment variable or .env.
+    # Empty default exists only to satisfy static type checking.
+    DATABASE_URL: str = ""
 
     # ========================================================================
     # JWT Authentication
     # ========================================================================
 
-    SECRET_KEY: str
+    # Supplied through SECRET_KEY environment variable or .env.
+    # Never use a real secret as a source-code default.
+    SECRET_KEY: str = ""
 
     JWT_ALGORITHM: str = "HS256"
 
@@ -267,11 +271,14 @@ class Settings(BaseSettings):
 
     SMTP_PORT: int = 587
 
-    SMTP_USERNAME: str
+    # Supplied through SMTP_USERNAME environment variable or .env.
+    SMTP_USERNAME: str = ""
 
-    SMTP_PASSWORD: str
+    # Supplied through SMTP_PASSWORD environment variable or .env.
+    SMTP_PASSWORD: str = ""
 
-    SMTP_FROM_EMAIL: str
+    # Supplied through SMTP_FROM_EMAIL environment variable or .env.
+    SMTP_FROM_EMAIL: str = ""
 
     SMTP_FROM_NAME: str = "TRACKIT"
 
