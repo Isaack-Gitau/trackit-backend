@@ -1,15 +1,17 @@
 """
 TRACKIT Profile Router.
 
-Provides authenticated-user profile endpoints and
-authorized administrative user inspection.
+Provides authenticated-user profile endpoints,
+account management, and authorized administrative
+user inspection.
 
 Endpoints:
 
-    GET   /api/profile
-    PATCH /api/profile
+    GET    /api/profile
+    PATCH  /api/profile
+    DELETE /api/profile/account
 
-    GET   /api/profile/admin/{user_id}
+    GET    /api/profile/admin/{user_id}
 
 Users may:
 - View their own profile.
@@ -23,15 +25,22 @@ Users may:
 - Update their address.
 - Update their social links.
 - Update their preferences.
+- Permanently delete their own account.
 
 Administrators may:
 - View any user's detailed account/profile information.
 
 Administrative responses deliberately exclude
 authentication and security secrets.
+
+Account deletion requires the user's current
+password and permanently removes the account
+and its user-owned data.
 """
 
-from fastapi import APIRouter, Depends, HTTPException, status
+import logging
+
+from fastapi import APIRouter, Body, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -47,9 +56,19 @@ from app.schemas.profile import (
     ProfileUpdate,
 )
 from app.services.user import (
+    delete_user_account_service,
     get_user,
     update_user_profile_service,
+    verify_user_password,
 )
+from app.utils.images import delete_stored_image
+
+
+# ============================================================================
+# LOGGING
+# ============================================================================
+
+logger = logging.getLogger(__name__)
 
 
 # ============================================================================
@@ -219,6 +238,132 @@ def update_profile(
     return ProfileResponse.model_validate(
         updated_user
     )
+
+
+# ============================================================================
+# DELETE CURRENT USER ACCOUNT
+# ============================================================================
+
+
+@router.delete(
+    "/account",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete current user account",
+)
+def delete_account(
+    password: str = Body(
+        ...,
+        embed=True,
+        min_length=1,
+        description="Current account password required to permanently delete the account.",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> None:
+    """
+    Permanently delete the authenticated user's account.
+
+    Security:
+
+    - The request must contain a valid authenticated session.
+    - The user's current password must be supplied.
+    - The password is verified against the stored password hash.
+    - No password is stored or logged.
+
+    Database behavior:
+
+    - The user's account is deleted.
+    - Existing database CASCADE relationships remove
+      user-owned items, claims, reports, notifications,
+      comments, matches, and authentication tokens.
+    - Reviewer references using SET NULL are retained.
+    - Audit-log references using SET NULL are retained.
+
+    Media behavior:
+
+    - The user's profile picture and item images are collected
+      before deletion.
+    - The database deletion is committed first.
+    - Physical media files are removed only after the database
+      transaction succeeds.
+
+    If physical media cleanup fails after a successful account
+    deletion, the account remains deleted. The cleanup failure
+    is logged for later operational handling.
+
+    Returns:
+        None. HTTP 204 No Content is returned on success.
+    """
+
+    # -------------------------------------------------------------------------
+    # Verify current password.
+    #
+    # We deliberately use the same password verification service
+    # used elsewhere in the application so password verification
+    # remains centralized.
+    # -------------------------------------------------------------------------
+
+    if not verify_user_password(
+        current_user,
+        password,
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Current password is incorrect.",
+        )
+
+    # -------------------------------------------------------------------------
+    # Collect media and delete the account inside the current
+    # database transaction.
+    #
+    # The service flushes the deletion but does NOT commit.
+    # -------------------------------------------------------------------------
+
+    try:
+        media_storage_keys = delete_user_account_service(
+            db,
+            current_user,
+        )
+
+        # ---------------------------------------------------------------------
+        # Explicitly commit this transaction.
+        #
+        # This endpoint needs deterministic knowledge that the database
+        # deletion succeeded before physical media files are removed.
+        #
+        # A second commit from get_db() after the endpoint returns is
+        # harmless because the transaction is already complete.
+        # ---------------------------------------------------------------------
+
+        db.commit()
+
+    except Exception:
+        db.rollback()
+        raise
+
+    # -------------------------------------------------------------------------
+    # Remove physical media only after the database deletion has
+    # successfully committed.
+    #
+    # Filesystem cleanup failure must NOT resurrect the deleted account.
+    # -------------------------------------------------------------------------
+
+    for storage_key in media_storage_keys:
+        try:
+            delete_stored_image(
+                storage_key
+            )
+
+        except Exception:
+            logger.exception(
+                "Failed to delete account media after user deletion."
+            )
+
+    # -------------------------------------------------------------------------
+    # HTTP 204 response.
+    # -------------------------------------------------------------------------
+
+    return None
 
 
 # ============================================================================

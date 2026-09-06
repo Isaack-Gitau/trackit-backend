@@ -1101,9 +1101,11 @@ def test_comment_owner_can_delete_comment(
     assert response.status_code == 204
     assert response.content == b""
 
+    comment_id=comment.id
+
     db.expire_all()
 
-    assert db.get(Comment, comment.id) is None
+    assert db.get(Comment, comment_id) is None
 
 
 def test_unauthenticated_user_cannot_delete_comment(
@@ -1287,9 +1289,11 @@ def test_admin_can_delete_any_comment(
     assert response.status_code == 204
     assert response.content == b""
 
+    comment_id = comment.id
+
     db.expire_all()
 
-    assert db.get(Comment, comment.id) is None
+    assert db.get(Comment, comment_id) is None
 
 
 def test_regular_user_cannot_use_admin_comment_delete(

@@ -12,9 +12,13 @@ Responsibilities:
 - Check username/email availability.
 - Create users.
 - Update authenticated-user profile fields.
+- Collect user-owned media storage keys.
+- Delete users.
 
 Business rules such as authorization and profile validation
 belong in the service layer.
+
+Filesystem operations do NOT belong in this repository.
 """
 
 from collections.abc import Mapping
@@ -22,6 +26,7 @@ from collections.abc import Mapping
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
+from app.models.item import Item
 from app.models.user import User
 
 
@@ -325,3 +330,86 @@ def update_user_profile(
     db.refresh(user)
 
     return user
+
+
+# ============================================================================
+# ACCOUNT MEDIA
+# ============================================================================
+
+
+def get_user_media_storage_keys(
+    db: Session,
+    user: User,
+) -> list[str]:
+    """
+    Collect storage keys for media owned by a user.
+
+    The returned keys are collected before account deletion so that
+    the service layer can safely remove the corresponding files after
+    the database transaction has successfully committed.
+
+    Includes:
+
+    - The user's profile picture, when present.
+    - Images belonging to the user's items, when present.
+
+    This function performs database reads only.
+
+    It does NOT access or modify the filesystem.
+    """
+
+    storage_keys: list[str] = []
+
+    if user.profile_picture:
+        storage_keys.append(
+            user.profile_picture
+        )
+
+    result = db.execute(
+        select(Item.image).where(
+            Item.user_id == user.id,
+            Item.image.is_not(None),
+        )
+    )
+
+    for image_key in result.scalars():
+        if image_key:
+            storage_keys.append(image_key)
+
+    return storage_keys
+
+
+# ============================================================================
+# USER DELETION
+# ============================================================================
+
+
+def delete_user(
+    db: Session,
+    user: User,
+) -> None:
+    """
+    Delete a user from the database.
+
+    Database relationships are governed by the existing foreign-key
+    constraints and ORM relationship configuration.
+
+    Expected database behavior:
+
+    - User-owned items are deleted through CASCADE.
+    - Claims belonging to the user are deleted through CASCADE.
+    - Reports belonging to the user are deleted through CASCADE.
+    - Comments belonging to the user are deleted through CASCADE.
+    - Notifications belonging to the user are deleted through CASCADE.
+    - Authentication tokens belonging to the user are deleted through CASCADE.
+    - Matches associated with deleted items are deleted through CASCADE.
+    - Moderation reviewer references are set to NULL.
+    - Audit-log user references are retained with user_id set to NULL.
+
+    The transaction is intentionally NOT committed here.
+
+    The caller controls commit/rollback behavior.
+    """
+
+    db.delete(user)
+    db.flush()

@@ -18,12 +18,34 @@ Coverage:
 - Duplicate username protection.
 - Duplicate email protection.
 - Protection against modifying another user's profile.
+- Account deletion.
+- Password confirmation for account deletion.
+- User-owned data cleanup.
+- User-owned media cleanup.
+- Reviewer SET NULL behavior.
+- Audit-log SET NULL behavior.
+- Old JWT invalidation after account deletion.
+- Account deletion transaction behavior.
 """
 
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from app.core.security import create_access_token
+from app.core.config import settings
+from app.core.security import create_access_token, hash_password
+from app.models.audit_log import AuditLog
+from app.models.auth_token import AuthToken
+from app.models.claim import Claim
+from app.models.comment import Comment
+from app.models.item import Item
+from app.models.match import Match
+from app.models.notification import Notification
+from app.models.report import Report
 from app.models.user import User
 
 
@@ -41,10 +63,17 @@ def create_test_user(
     first_name: str = "Test",
     last_name: str = "User",
     is_verified: bool = True,
+    password: str | None = None,
 ) -> User:
     """
     Create a test user directly in the test database.
     """
+
+    password_hash = (
+        hash_password(password)
+        if password is not None
+        else "test-password-hash"
+    )
 
     user = User(
         id=user_id,
@@ -52,7 +81,7 @@ def create_test_user(
         first_name=first_name,
         last_name=last_name,
         email=email,
-        password_hash="test-password-hash",
+        password_hash=password_hash,
         role="user",
         is_active=True,
         is_verified=is_verified,
@@ -296,7 +325,6 @@ def test_update_email_invalidates_existing_access_token(
 
     old_headers = authenticated_headers(user)
 
-    # The existing token is valid before the email change.
     response = client.get(
         "/api/profile",
         headers=old_headers,
@@ -320,14 +348,13 @@ def test_update_email_invalidates_existing_access_token(
     assert user.is_verified is False
     assert user.token_version == 1
 
-    # The previously issued JWT still contains token_version=0,
-    # so it must no longer authenticate.
     response = client.get(
         "/api/profile",
         headers=old_headers,
     )
 
     assert response.status_code == 401
+
 
 # ============================================================================
 # NAME UPDATE
@@ -780,9 +807,7 @@ def test_profile_endpoint_only_updates_authenticated_user(
 
     response = client.patch(
         "/api/profile",
-        headers=authenticated_headers(
-            authenticated_user
-        ),
+        headers=authenticated_headers(authenticated_user),
         json={
             "username": "changedauthenticated",
         },
@@ -797,6 +822,7 @@ def test_profile_endpoint_only_updates_authenticated_user(
         "changedauthenticated"
     )
     assert other_user.username == "otheruser"
+
 
 # ============================================================================
 # ADMIN USER PROFILE
@@ -1107,7 +1133,8 @@ def test_admin_can_view_inactive_user(
     assert data["id"] == target_user.id
     assert data["is_active"] is False
 
-    # ============================================================================
+
+# ============================================================================
 # PATCH NULL / CLEAR SEMANTICS
 # ============================================================================
 
@@ -1397,7 +1424,7 @@ def test_update_profile_rejects_empty_first_name(
 
 
 def test_update_profile_rejects_empty_last_name(
-    client,
+    client: TestClient,
     db: Session,
 ):
     user = create_test_user(
@@ -1536,6 +1563,7 @@ def test_update_profile_omitted_nullable_field_remains_unchanged(
 
     user.bio = "Keep this biography."
     user.phone_number = "+254722222222"
+
     db.flush()
 
     response = client.patch(
@@ -1558,3 +1586,809 @@ def test_update_profile_omitted_nullable_field_remains_unchanged(
 
     assert user.bio == "Keep this biography."
     assert user.phone_number == "+254722222222"
+
+
+# ============================================================================
+# ACCOUNT DELETION
+# ============================================================================
+
+
+ACCOUNT_DELETE_PASSWORD = "Trackit@123"
+
+
+def test_delete_account_requires_authentication(
+    client: TestClient,
+):
+    """
+    Account deletion requires an authenticated user.
+    """
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_delete_account_rejects_incorrect_password(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Account deletion must require the user's current password.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2001,
+        username="wrongpassworduser",
+        email="wrongpassword@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": "WrongPassword@123",
+        },
+    )
+
+    assert response.status_code == 400
+
+    assert response.json()["detail"] == (
+        "Current password is incorrect."
+    )
+
+    persisted_user = db.get(User, user_id)
+
+    assert persisted_user is not None
+    assert persisted_user.id == 2001
+    assert persisted_user.username == "wrongpassworduser"
+
+
+def test_delete_account_requires_password(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Account deletion requires a non-empty password.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2002,
+        username="missingpassworduser",
+        email="missingpassword@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={},
+    )
+
+    assert response.status_code == 422
+
+    persisted_user = db.get(User, user_id)
+
+    assert persisted_user is not None
+
+
+def test_delete_account_with_correct_password_returns_204(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A user can delete their account using the correct password.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2003,
+        username="deleteuser",
+        email="deleteuser@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    db.expire_all()
+
+    assert db.get(User, user_id) is None
+
+
+def test_delete_account_invalidates_existing_access_token(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A JWT issued before account deletion cannot be used after
+    the user record has been removed.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2004,
+        username="deletedtokenuser",
+        email="deletedtoken@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    old_headers = authenticated_headers(user)
+
+    response = client.get(
+        "/api/profile",
+        headers=old_headers,
+    )
+
+    assert response.status_code == 200
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=old_headers,
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+
+    response = client.get(
+        "/api/profile",
+        headers=old_headers,
+    )
+
+    assert response.status_code == 401
+
+
+# ============================================================================
+# ACCOUNT DATA CLEANUP
+# ============================================================================
+
+
+def test_delete_account_removes_user_owned_data(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Deleting an account removes the user's directly owned records
+    and records connected through CASCADE relationships.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2010,
+        username="cleanupuser",
+        email="cleanupuser@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    item = Item(
+        user_id=user.id,
+        title="Lost phone",
+        description="Test phone",
+        type="lost",
+        category="Electronics",
+        location="Nairobi",
+        status="approved",
+    )
+
+    db.add(item)
+    db.flush()
+
+    claim = Claim(
+        item_id=item.id,
+        claimant_id=user.id,
+        reason="I believe this item belongs to me.",
+    )
+
+    report = Report(
+        item_id=item.id,
+        reporter_id=user.id,
+        reason=(
+            "This report is being created for account "
+            "deletion testing."
+        ),
+        description=(
+            "Test report created to verify account "
+            "deletion cleanup."
+        ),
+    )
+
+    notification = Notification(
+        user_id=user.id,
+        type="account",
+        category="system",
+        priority="normal",
+        title="Test notification",
+        message="Test notification message",
+    )
+
+    comment = Comment(
+        item_id=item.id,
+        user_id=user.id,
+        content="This is a test comment.",
+    )
+
+    auth_token = AuthToken(
+        user_id=user.id,
+        token_hash="a" * 64,
+        token_type="password_reset",
+        expires_at=(
+            datetime.now(timezone.utc)
+            + timedelta(minutes=15)
+        ),
+    )
+
+    db.add_all(
+        [
+            claim,
+            report,
+            notification,
+            comment,
+            auth_token,
+        ]
+    )
+
+    db.flush()
+
+    match = Match(
+        lost_item_id=item.id,
+        found_item_id=item.id,
+        score=100,
+        match_level="high",
+        category_score=100,
+        title_score=100,
+        description_score=100,
+        location_score=100,
+        time_score=100,
+        reason=(
+            "Test match created to verify account "
+            "deletion cleanup."
+        ),
+    )
+
+    db.add(match)
+    db.flush()
+
+    item_id = item.id
+    claim_id = claim.id
+    report_id = report.id
+    notification_id = notification.id
+    comment_id = comment.id
+    token_id = auth_token.id
+    match_id = match.id
+    user_id = user.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    assert db.get(User, user_id) is None
+    assert db.get(Item, item_id) is None
+    assert db.get(Claim, claim_id) is None
+    assert db.get(Report, report_id) is None
+    assert db.get(Notification, notification_id) is None
+    assert db.get(Comment, comment_id) is None
+    assert db.get(AuthToken, token_id) is None
+    assert db.get(Match, match_id) is None
+
+
+def test_delete_account_removes_profile_picture_file(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Account deletion removes the user's stored profile picture.
+    """
+
+    storage_key = "items/account-delete-profile.webp"
+
+    media_root = Path(settings.MEDIA_ROOT)
+
+    image_path = (
+        media_root
+        / "items"
+        / "account-delete-profile.webp"
+    )
+
+    image_path.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    image_path.write_bytes(
+        b"test-profile-image"
+    )
+
+    user = create_test_user(
+        db,
+        user_id=2011,
+        username="profileimageuser",
+        email="profileimage@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    user.profile_picture = storage_key
+
+    db.flush()
+
+    assert image_path.exists()
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+    assert not image_path.exists()
+
+    db.expire_all()
+
+    assert db.get(User, user_id) is None
+
+
+def test_delete_account_removes_item_image_files(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Account deletion removes stored images belonging to the
+    user's items.
+    """
+
+    storage_key_one = (
+        "items/account-delete-item-one.webp"
+    )
+
+    storage_key_two = (
+        "items/account-delete-item-two.webp"
+    )
+
+    media_root = Path(settings.MEDIA_ROOT)
+
+    image_path_one = (
+        media_root
+        / "items"
+        / "account-delete-item-one.webp"
+    )
+
+    image_path_two = (
+        media_root
+        / "items"
+        / "account-delete-item-two.webp"
+    )
+
+    image_path_one.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    image_path_one.write_bytes(
+        b"test-item-image-one"
+    )
+
+    image_path_two.write_bytes(
+        b"test-item-image-two"
+    )
+
+    user = create_test_user(
+        db,
+        user_id=2012,
+        username="itemimageuser",
+        email="itemimage@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    item_one = Item(
+        user_id=user.id,
+        title="Item one",
+        description="Test item one",
+        type="lost",
+        category="Other",
+        location="Nairobi",
+        image=storage_key_one,
+        status="approved",
+    )
+
+    item_two = Item(
+        user_id=user.id,
+        title="Item two",
+        description="Test item two",
+        type="found",
+        category="Other",
+        location="Nairobi",
+        image=storage_key_two,
+        status="approved",
+    )
+
+    db.add_all(
+        [
+            item_one,
+            item_two,
+        ]
+    )
+
+    db.flush()
+
+    assert image_path_one.exists()
+    assert image_path_two.exists()
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+
+    assert not image_path_one.exists()
+    assert not image_path_two.exists()
+
+    db.expire_all()
+
+    assert db.get(User, user_id) is None
+
+
+# ============================================================================
+# REVIEWER SET NULL / AUDIT LOG RETENTION
+# ============================================================================
+
+
+def test_delete_account_preserves_review_records_with_null_reviewer(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Records reviewed by the deleted user remain in the database,
+    but their reviewer references become NULL.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2020,
+        username="reviewerdeleteuser",
+        email="reviewerdelete@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    owner = create_test_user(
+        db,
+        user_id=2021,
+        username="reviewedowner",
+        email="reviewedowner@example.com",
+    )
+
+    item = Item(
+        user_id=owner.id,
+        title="Reviewed item",
+        description="Test reviewed item",
+        type="lost",
+        category="Other",
+        location="Nairobi",
+        status="approved",
+        reviewed_by=user.id,
+    )
+
+    db.add(item)
+    db.flush()
+
+    report = Report(
+        item_id=item.id,
+        reporter_id=owner.id,
+        reason=(
+            "This report is being created for account "
+            "deletion testing"
+        ),
+        description=(
+            "Test reviewed report created to verify "
+            "reviewer cleanup."
+        ),
+        reviewed_by=user.id,
+    )
+
+    claim = Claim(
+        item_id=item.id,
+        claimant_id=owner.id,
+        reason="I believe this item belongs to me.",
+        reviewed_by=user.id,
+    )
+
+    db.add_all(
+        [
+            report,
+            claim,
+        ]
+    )
+
+    db.flush()
+
+    item_id = item.id
+    report_id = report.id
+    claim_id = claim.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    persisted_item = db.get(
+        Item,
+        item_id,
+    )
+
+    persisted_report = db.get(
+        Report,
+        report_id,
+    )
+
+    persisted_claim = db.get(
+        Claim,
+        claim_id,
+    )
+
+    assert persisted_item is not None
+    assert persisted_report is not None
+    assert persisted_claim is not None
+
+    assert persisted_item.reviewed_by is None
+    assert persisted_report.reviewed_by is None
+    assert persisted_claim.reviewed_by is None
+
+
+def test_delete_account_preserves_audit_logs_with_null_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Audit logs remain after account deletion, but the deleted user's
+    foreign-key reference is cleared.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2022,
+        username="auditdeleteuser",
+        email="auditdelete@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    audit_log = AuditLog(
+        user_id=user.id,
+        action="test_event",
+        details="Account deletion test.",
+    )
+
+    db.add(audit_log)
+    db.flush()
+
+    audit_log_id = audit_log.id
+
+    response = client.request(
+        "DELETE",
+        "/api/profile/account",
+        headers=authenticated_headers(user),
+        json={
+            "password": ACCOUNT_DELETE_PASSWORD,
+        },
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    persisted_log = db.get(
+        AuditLog,
+        audit_log_id,
+    )
+
+    assert persisted_log is not None
+    assert persisted_log.user_id is None
+
+
+# ============================================================================
+# TRANSACTION BEHAVIOR
+# ============================================================================
+
+
+def test_delete_user_account_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    The account-deletion service performs a database flush but does not
+    commit. The caller can therefore roll the operation back.
+    """
+
+    from app.services.user import (
+        delete_user_account_service,
+    )
+
+    user = create_test_user(
+        db,
+        user_id=2030,
+        username="rollbackuser",
+        email="rollback@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    nested = db.begin_nested()
+
+    storage_keys = delete_user_account_service(
+        db,
+        user,
+    )
+
+    assert storage_keys == []
+
+    assert db.get(User, user_id) is None
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        user_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.id == user_id
+    assert restored_user.username == "rollbackuser"
+    assert restored_user.email == "rollback@example.com"
+
+
+def test_delete_account_service_failure_does_not_delete_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    If the account deletion service fails before commit, the route
+    rolls the database transaction back and the account remains.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2031,
+        username="servicefailureuser",
+        email="servicefailure@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    with patch(
+        "app.routers.profile.delete_user_account_service",
+        side_effect=RuntimeError(
+            "simulated database failure"
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="simulated database failure",
+        ):
+            client.request(
+                "DELETE",
+                "/api/profile/account",
+                headers=authenticated_headers(user),
+                json={
+                    "password": ACCOUNT_DELETE_PASSWORD,
+                },
+            )
+
+    db.expire_all()
+
+    remaining_user = db.get(
+        User,
+        user_id,
+    )
+
+    assert remaining_user is not None
+    assert remaining_user.id == user_id
+
+
+# ============================================================================
+# POST-COMMIT MEDIA CLEANUP FAILURE
+# ============================================================================
+
+
+def test_delete_account_media_cleanup_failure_does_not_restore_account(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Once the database deletion has committed, a physical media cleanup
+    failure must not restore the deleted account or turn the successful
+    account deletion into a failed transaction.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=2040,
+        username="mediafailureuser",
+        email="mediafailure@example.com",
+        password=ACCOUNT_DELETE_PASSWORD,
+    )
+
+    user_id = user.id
+
+    user.profile_picture = (
+        "items/media-cleanup-failure.webp"
+    )
+
+    db.flush()
+
+    with patch(
+        "app.routers.profile.delete_stored_image",
+        side_effect=RuntimeError(
+            "simulated media cleanup failure"
+        ),
+    ):
+        response = client.request(
+            "DELETE",
+            "/api/profile/account",
+            headers=authenticated_headers(user),
+            json={
+                "password": ACCOUNT_DELETE_PASSWORD,
+            },
+        )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    assert db.get(User, user_id) is None

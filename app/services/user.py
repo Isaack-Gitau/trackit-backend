@@ -7,6 +7,7 @@ Responsibilities:
 - Find users
 - Create users
 - Update profile information
+- Delete user accounts
 - Activate/deactivate accounts
 - Verify email accounts
 - Change passwords
@@ -31,12 +32,14 @@ from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.repositories.users import (
     create_user,
+    delete_user,
     get_user_by_email,
     get_user_by_email_excluding_id,
     get_user_by_id,
     get_user_by_login,
     get_user_by_username,
     get_user_by_username_excluding_id,
+    get_user_media_storage_keys,
     update_user_profile,
 )
 
@@ -187,6 +190,60 @@ def create_user_account(
         email=email,
         password_hash=password_hash,
     )
+
+
+# ============================================================================
+# ACCOUNT DELETION
+# ============================================================================
+
+
+def delete_user_account_service(
+    db: Session,
+    user: User,
+) -> list[str]:
+    """
+    Delete the authenticated user's account.
+
+    Before deleting the database record, collect all media storage keys
+    belonging to the account so the corresponding physical files can be
+    removed after the database transaction has successfully committed.
+
+    Database behavior:
+
+    - The user record is deleted.
+    - User-owned items are deleted through the existing CASCADE relationship.
+    - Claims, reports, notifications, comments, matches, and auth tokens
+      associated with the deleted user are removed through their existing
+      relationships/foreign keys.
+    - Reviewer references using SET NULL remain in the database.
+    - Audit-log user references using SET NULL remain in the database.
+
+    Filesystem behavior:
+
+    - No files are deleted here.
+    - The returned storage keys are intended for post-commit cleanup.
+
+    Transaction behavior:
+
+    - The operation is flushed but NOT committed.
+    - The caller controls commit/rollback behavior.
+
+    Returns:
+        A list of storage keys belonging to the user's profile picture
+        and item images.
+    """
+
+    media_storage_keys = get_user_media_storage_keys(
+        db,
+        user,
+    )
+
+    delete_user(
+        db,
+        user,
+    )
+
+    return media_storage_keys
 
 
 # ============================================================================

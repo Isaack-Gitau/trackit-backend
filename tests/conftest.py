@@ -44,18 +44,20 @@ TEST_DATABASE_URL = (
 # ============================================================================
 # DATABASE FIXTURE
 # ============================================================================
-
-
 @pytest.fixture
 def db():
     """
     Provide an isolated database session for each test.
 
-    Tests are allowed to call db.commit() normally.
+    The database connection is wrapped in an outer transaction owned
+    by the pytest fixture.
 
-    The fixture wraps the connection in an outer transaction.
-    Everything performed by the test is rolled back after the test
-    completes.
+    The SQLAlchemy Session uses create_savepoint mode so that normal
+    application calls to db.commit() and db.rollback() operate inside
+    SAVEPOINTs rather than destroying the fixture's outer transaction.
+
+    This preserves test isolation while allowing production code to
+    use normal transaction behavior.
     """
 
     engine = create_engine(
@@ -65,13 +67,14 @@ def db():
 
     connection = engine.connect()
 
-    transaction = connection.begin()
+    outer_transaction = connection.begin()
 
     TestingSessionLocal = sessionmaker(
         bind=connection,
         autoflush=False,
         autocommit=False,
         expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
     )
 
     session: Session = TestingSessionLocal()
@@ -82,7 +85,8 @@ def db():
     finally:
         session.close()
 
-        transaction.rollback()
+        if outer_transaction.is_active:
+            outer_transaction.rollback()
 
         connection.close()
 
@@ -114,6 +118,7 @@ def admin_user(db: Session):
 
     return user
 
+
 # ============================================================================
 # FASTAPI DATABASE OVERRIDE
 # ============================================================================
@@ -122,14 +127,44 @@ def admin_user(db: Session):
 @pytest.fixture
 def client(db: Session):
     """
-    Provide a FastAPI TestClient using the isolated test database.
+    Provide a FastAPI TestClient using a separate API session.
 
-    This ensures API integration tests never accidentally use
-    the development database.
+    The test/setup session and API session share the same database
+    connection and outer transaction.
+
+    Before the API session is created, the test session commits its
+    current SAVEPOINT. This keeps test-created data inside the outer
+    transaction while ensuring that an application-level rollback
+    cannot remove the test setup data.
+
+    The API session uses its own SAVEPOINT through
+    join_transaction_mode="create_savepoint".
     """
 
+    connection = db.get_bind()
+
+    if connection is None:
+        raise RuntimeError(
+            "Test database session is not bound to a connection."
+        )
+
+    # Preserve all test setup performed through `db` inside the
+    # outer pytest transaction before handing the connection to
+    # the API session.
+    db.commit()
+
+    ApiSessionLocal = sessionmaker(
+        bind=connection,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+        join_transaction_mode="create_savepoint",
+    )
+
+    api_db: Session = ApiSessionLocal()
+
     def override_get_db():
-        yield db
+        yield api_db
 
     app.dependency_overrides[get_db] = override_get_db
 
@@ -139,6 +174,8 @@ def client(db: Session):
 
     finally:
         app.dependency_overrides.clear()
+
+        api_db.close()
 
 
 # ============================================================================

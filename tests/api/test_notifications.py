@@ -821,6 +821,8 @@ def test_user_can_delete_own_notification(
         user_id=user.id,
     )
 
+    notification_id = notification.id
+
     response = client.delete(
         f"/api/notifications/{notification.id}",
         headers=auth_headers(user),
@@ -832,9 +834,11 @@ def test_user_can_delete_own_notification(
         "deleted_count": 1,
     }
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        notification.id,
+        notification_id,
     ) is None
 
 
@@ -923,13 +927,17 @@ def test_user_can_delete_selected_own_notifications(
         title="Notification Three",
     )
 
+    first_id = first.id
+    second_id = second.id
+    third_id = third.id
+
     response = client.request(
         "DELETE",
         "/api/notifications/selected",
         json={
             "notification_ids": [
-                first.id,
-                third.id,
+                first_id,
+                third_id,
             ],
         },
         headers=auth_headers(user),
@@ -941,19 +949,21 @@ def test_user_can_delete_selected_own_notifications(
         "deleted_count": 2,
     }
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        first.id,
+        first_id,
     ) is None
 
     assert db.get(
         Notification,
-        second.id,
+        second_id,
     ) is not None
 
     assert db.get(
         Notification,
-        third.id,
+        third_id,
     ) is None
 
 
@@ -988,13 +998,19 @@ def test_selected_delete_only_deletes_authenticated_users_notifications(
         user_id=user_two.id,
     )
 
+    own_one_id = own_one.id
+    own_two_id = own_two.id
+    other_one_id = other_one.id
+
+
+
     response = client.request(
         "DELETE",
         "/api/notifications/selected",
         json={
             "notification_ids": [
-                own_one.id,
-                other_one.id,
+                own_one_id,
+                other_one_id,
             ],
         },
         headers=auth_headers(user_one),
@@ -1006,19 +1022,21 @@ def test_selected_delete_only_deletes_authenticated_users_notifications(
         "deleted_count": 1,
     }
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        own_one.id,
+        own_one_id,
     ) is None
 
     assert db.get(
         Notification,
-        own_two.id,
+        own_two_id,
     ) is not None
 
     assert db.get(
         Notification,
-        other_one.id,
+        other_one_id,
     ) is not None
 
 
@@ -1036,6 +1054,8 @@ def test_selected_delete_with_nonexistent_notification_ids(
         db,
         user_id=user.id,
     )
+
+    notification_id = notification.id
 
     response = client.request(
         "DELETE",
@@ -1055,9 +1075,11 @@ def test_selected_delete_with_nonexistent_notification_ids(
         "deleted_count": 1,
     }
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        notification.id,
+        notification_id,
     ) is None
 
 
@@ -1124,6 +1146,9 @@ def test_user_can_delete_all_own_notifications(
         title="Notification Two",
     )
 
+    first_id = first.id
+    second_id = second.id
+
     response = client.delete(
         "/api/notifications",
         headers=auth_headers(user),
@@ -1135,14 +1160,16 @@ def test_user_can_delete_all_own_notifications(
 
     assert data["deleted_count"] == 2
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        first.id,
+        first_id,
     ) is None
 
     assert db.get(
         Notification,
-        second.id,
+        second_id,
     ) is None
 
 
@@ -1177,6 +1204,10 @@ def test_delete_all_only_deletes_authenticated_users_notifications(
         user_id=user_two.id,
     )
 
+    own_one_id = own_one.id
+    own_two_id = own_two.id
+    other_id = other.id
+
     response = client.delete(
         "/api/notifications",
         headers=auth_headers(user_one),
@@ -1188,19 +1219,21 @@ def test_delete_all_only_deletes_authenticated_users_notifications(
         "deleted_count": 2,
     }
 
+    db.expire_all()
+
     assert db.get(
         Notification,
-        own_one.id,
+        own_one_id,
     ) is None
 
     assert db.get(
         Notification,
-        own_two.id,
+        own_two_id,
     ) is None
 
     assert db.get(
         Notification,
-        other.id,
+        other_id,
     ) is not None
 
 
