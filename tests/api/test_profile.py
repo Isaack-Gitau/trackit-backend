@@ -2392,3 +2392,191 @@ def test_delete_account_media_cleanup_failure_does_not_restore_account(
     db.expire_all()
 
     assert db.get(User, user_id) is None
+
+
+    #=============================================================
+    #Admin promotion
+    #=============================================================
+
+def test_promote_user_requires_authentication(
+    client: TestClient,
+    db: Session,
+  ):
+    target_user = create_test_user(
+        db,
+        user_id=1031,
+        username="promotiontarget",
+        email="promotiontarget@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote",
+    )
+
+    assert response.status_code == 401
+
+
+def test_normal_user_cannot_promote_user_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    normal_user = create_test_user(
+        db,
+        user_id=1032,
+        username="normalpromoter",
+        email="normalpromoter@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=1033,
+        username="promotiontarget2",
+        email="promotiontarget2@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.role == "user"
+
+
+def test_admin_can_promote_user_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_test_user(
+        db,
+        user_id=1034,
+        username="promotingadmin",
+        email="promotingadmin@example.com",
+    )
+
+    admin.role = "admin"
+    db.flush()
+
+    target_user = create_test_user(
+        db,
+        user_id=1035,
+        username="newadmin",
+        email="newadmin@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote",
+        headers=admin_authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["role"] == "admin"
+
+    db.refresh(target_user)
+
+    assert target_user.role == "admin" 
+
+def test_admin_cannot_promote_existing_admin(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_test_user(
+        db,
+        user_id=1036,
+        username="promotingadmin2",
+        email="promotingadmin2@example.com",
+    )
+
+    admin.role = "admin"
+    db.flush()
+
+    target_admin = create_test_user(
+        db,
+        user_id=1037,
+        username="alreadyadmin",
+        email="alreadyadmin@example.com",
+    )
+
+    target_admin.role = "admin"
+    db.flush()
+
+    response = client.post(
+        f"/api/profile/admin/{target_admin.id}/promote",
+        headers=admin_authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+def test_admin_promote_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_test_user(
+        db,
+        user_id=1038,
+        username="missingpromotionadmin",
+        email="missingpromotionadmin@example.com",
+    )
+
+    admin.role = "admin"
+    db.flush()
+
+    response = client.post(
+        "/api/profile/admin/999999/promote",
+        headers=admin_authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+def test_admin_cannot_promote_themselves(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_test_user(
+        db,
+        user_id=1039,
+        username="selfpromotionadmin",
+        email="selfpromotionadmin@example.com",
+    )
+
+    admin.role = "admin"
+    db.flush()
+
+    response = client.post(
+        f"/api/profile/admin/{admin.id}/promote",
+        headers=admin_authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+def test_profile_update_cannot_change_user_role(
+    client: TestClient,
+    db: Session,
+):
+    user = create_test_user(
+        db,
+        user_id=1040,
+        username="roleprotected",
+        email="roleprotected@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(user),
+        json={
+            "role": "admin",
+        },
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(user)
+
+    assert user.role == "user"

@@ -41,6 +41,7 @@ from app.repositories.users import (
     get_user_by_username_excluding_id,
     get_user_media_storage_keys,
     update_user_profile,
+    promote_user_to_admin,
 )
 
 
@@ -603,6 +604,51 @@ def deactivate_user(
     db.flush()
 
     return user
+
+# ============================================================================
+# ADMINISTRATION
+# ============================================================================
+
+
+def promote_user_to_admin_service(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+) -> User:
+    """
+    Promote a user account to administrator.
+
+    Security rules:
+
+    - Only callers already authorized as administrators may invoke
+      this service through the API layer.
+    - An administrator cannot promote themselves.
+    - An account that is already an administrator cannot be promoted
+      again.
+    - The operation is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Raises:
+        ValueError:
+            If the acting administrator attempts to promote themselves,
+            or if the target is already an administrator.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot promote themselves."
+        )
+
+    if (target_user.role or "").strip().lower() == "admin":
+        raise ValueError(
+            "User is already an administrator."
+        )
+
+    return promote_user_to_admin(
+        db,
+        target_user,
+    )
 
 
 # ============================================================================

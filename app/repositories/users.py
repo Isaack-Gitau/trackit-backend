@@ -23,6 +23,8 @@ Filesystem operations do NOT belong in this repository.
 
 from collections.abc import Mapping
 
+from datetime import datetime, timezone
+
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -223,6 +225,26 @@ def create_user(
 
     return user
 
+
+def promote_user_to_admin(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Promote an existing user account to administrator.
+
+    The operation is intentionally not committed here.
+    The caller controls transaction commit/rollback.
+    """
+
+    user.role = "admin"
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
 
 # ============================================================================
 # PROFILE AVAILABILITY

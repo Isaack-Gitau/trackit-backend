@@ -60,7 +60,14 @@ from app.services.user import (
     get_user,
     update_user_profile_service,
     verify_user_password,
+    promote_user_to_admin_service,
 )
+
+from app.services.audit_log import (
+    AUDIT_ADMIN_ACTION,
+    create_audit_log,
+)
+
 from app.utils.images import delete_stored_image
 
 
@@ -422,3 +429,64 @@ def get_admin_user_profile(
     return AdminUserDetailResponse.model_validate(
         user
     )
+
+@router.post(
+    "/admin/{user_id}/promote",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Promote a user to administrator",
+)
+def promote_user_to_admin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Promote an existing user account to administrator.
+
+    Only authenticated administrators may perform this action.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        promoted_user = promote_user_to_admin_service(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"promoted user {target_user.id} "
+                "to administrator."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            promoted_user
+        )
+
+    except ValueError as exc:
+
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+
