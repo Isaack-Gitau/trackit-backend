@@ -14,6 +14,7 @@ Responsibilities:
 - Update authenticated-user profile fields.
 - Collect user-owned media storage keys.
 - Delete users.
+- Apply role changes.
 
 Business rules such as authorization and profile validation
 belong in the service layer.
@@ -22,12 +23,12 @@ Filesystem operations do NOT belong in this repository.
 """
 
 from collections.abc import Mapping
-
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.core.constants import UserRole
 from app.models.item import Item
 from app.models.user import User
 
@@ -206,6 +207,10 @@ def create_user(
 ) -> User:
     """
     Create a new TRACKIT user.
+
+    New accounts are always created with the regular user role.
+    Elevated roles must be assigned through the administrative
+    role-management workflow.
     """
 
     user = User(
@@ -214,7 +219,7 @@ def create_user(
         last_name=last_name.strip(),
         email=email.strip().lower(),
         password_hash=password_hash,
-        role="user",
+        role=UserRole.USER,
         is_active=True,
         is_verified=False,
     )
@@ -226,25 +231,141 @@ def create_user(
     return user
 
 
-def promote_user_to_admin(
+# ============================================================================
+# ROLE MANAGEMENT
+# ============================================================================
+
+
+def count_users_by_role(
+    db: Session,
+    role: str,
+) -> int:
+    """
+    Count users currently assigned to a specific role.
+
+    This function performs a database read only.
+
+    Role values should normally come from the centralized
+    UserRole constants.
+    """
+
+    result = db.execute(
+        select(
+            func.count(User.id)
+        ).where(
+            User.role == role
+        )
+    )
+
+    return int(
+        result.scalar_one()
+    )
+
+
+# -----------------------------------------------------------------------------
+
+
+def promote_user_to_moderator(
     db: Session,
     user: User,
 ) -> User:
     """
-    Promote an existing user account to administrator.
+    Promote an existing user account to moderator.
 
     The operation is intentionally not committed here.
     The caller controls transaction commit/rollback.
     """
 
-    user.role = "admin"
-    user.updated_at = datetime.now(timezone.utc)
+    user.role = UserRole.MODERATOR
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
 
     db.add(user)
     db.flush()
     db.refresh(user)
 
     return user
+
+
+# -----------------------------------------------------------------------------
+
+
+def promote_moderator_to_admin(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Promote an existing moderator account to administrator.
+
+    The operation is intentionally not committed here.
+    The caller controls transaction commit/rollback.
+    """
+
+    user.role = UserRole.ADMIN
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
+
+
+# -----------------------------------------------------------------------------
+
+
+def demote_admin_to_moderator(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Demote an administrator account to moderator.
+
+    The operation is intentionally not committed here.
+    The caller controls transaction commit/rollback.
+    """
+
+    user.role = UserRole.MODERATOR
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
+
+
+# -----------------------------------------------------------------------------
+
+
+def revoke_moderator(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Revoke moderator privileges and return the account to
+    the regular user role.
+
+    The operation is intentionally not committed here.
+    The caller controls transaction commit/rollback.
+    """
+
+    user.role = UserRole.USER
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
+
 
 # ============================================================================
 # PROFILE AVAILABILITY

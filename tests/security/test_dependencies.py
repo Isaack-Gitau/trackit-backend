@@ -13,6 +13,7 @@ Tests:
 - Valid authenticated user
 - Verified-user authorization
 - Role-based authorization
+- Moderator authorization
 - Administrator authorization
 - Multiple allowed roles
 - Invalid role configuration
@@ -24,10 +25,12 @@ from jose import JWTError
 
 from app.api.deps import (
     get_current_admin,
+    get_current_moderator,
     get_current_user,
     get_current_verified_user,
     require_role,
 )
+from app.core.constants import UserRole
 from app.core.security import create_access_token
 from app.models.user import User
 
@@ -40,7 +43,7 @@ from app.models.user import User
 def make_user(
     *,
     user_id: int = 1,
-    role: str = "user",
+    role: str = UserRole.USER,
     is_active: bool = True,
     is_verified: bool = True,
     token_version: int = 0,
@@ -66,7 +69,7 @@ def make_user(
 def make_token(
     *,
     user_id: int = 1,
-    role: str = "user",
+    role: str = UserRole.USER,
     token_version: int = 0,
 ) -> str:
     """
@@ -301,10 +304,10 @@ def test_require_role_rejects_invalid_configuration():
 
 
 def test_require_role_rejects_user_without_required_role():
-    dependency = require_role("admin")
+    dependency = require_role(UserRole.ADMIN)
 
     user = make_user(
-        role="user",
+        role=UserRole.USER,
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -320,10 +323,10 @@ def test_require_role_rejects_user_without_required_role():
 
 
 def test_require_role_accepts_matching_role():
-    dependency = require_role("admin")
+    dependency = require_role(UserRole.ADMIN)
 
     user = make_user(
-        role="admin",
+        role=UserRole.ADMIN,
     )
 
     result = dependency(
@@ -335,12 +338,12 @@ def test_require_role_accepts_matching_role():
 
 def test_require_role_supports_multiple_roles():
     dependency = require_role(
-        "admin",
-        "moderator",
+        UserRole.ADMIN,
+        UserRole.MODERATOR,
     )
 
     user = make_user(
-        role="moderator",
+        role=UserRole.MODERATOR,
     )
 
     result = dependency(
@@ -356,7 +359,7 @@ def test_require_role_normalizes_roles():
     )
 
     user = make_user(
-        role="admin",
+        role=UserRole.ADMIN,
     )
 
     result = dependency(
@@ -367,13 +370,64 @@ def test_require_role_normalizes_roles():
 
 
 # ============================================================================
+# MODERATOR
+# ============================================================================
+
+
+def test_get_current_moderator_accepts_moderator():
+    user = make_user(
+        role=UserRole.MODERATOR,
+    )
+
+    result = get_current_moderator(
+        current_user=user,
+    )
+
+    assert result is user
+
+
+def test_get_current_moderator_accepts_admin():
+    user = make_user(
+        role=UserRole.ADMIN,
+    )
+
+    result = get_current_moderator(
+        current_user=user,
+    )
+
+    assert result is user
+
+
+def test_get_current_moderator_rejects_regular_user():
+    dependency = require_role(
+        UserRole.MODERATOR,
+        UserRole.ADMIN,
+    )
+
+    user = make_user(
+        role=UserRole.USER,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        dependency(
+            current_user=user,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert (
+        exc_info.value.detail
+        == "You do not have permission to perform this action."
+    )
+
+
+# ============================================================================
 # ADMINISTRATOR
 # ============================================================================
 
 
 def test_get_current_admin_accepts_admin():
     user = make_user(
-        role="admin",
+        role=UserRole.ADMIN,
     )
 
     result = get_current_admin(
@@ -383,11 +437,11 @@ def test_get_current_admin_accepts_admin():
     assert result is user
 
 
-def test_get_current_admin_rejects_regular_user():
-    dependency = require_role("admin")
+def test_get_current_admin_rejects_moderator():
+    dependency = require_role(UserRole.ADMIN)
 
     user = make_user(
-        role="user",
+        role=UserRole.MODERATOR,
     )
 
     with pytest.raises(HTTPException) as exc_info:
@@ -396,3 +450,26 @@ def test_get_current_admin_rejects_regular_user():
         )
 
     assert exc_info.value.status_code == 403
+    assert (
+        exc_info.value.detail
+        == "You do not have permission to perform this action."
+    )
+
+
+def test_get_current_admin_rejects_regular_user():
+    dependency = require_role(UserRole.ADMIN)
+
+    user = make_user(
+        role=UserRole.USER,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        dependency(
+            current_user=user,
+        )
+
+    assert exc_info.value.status_code == 403
+    assert (
+        exc_info.value.detail
+        == "You do not have permission to perform this action."
+    )

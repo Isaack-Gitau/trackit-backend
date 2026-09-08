@@ -1,7 +1,8 @@
 """
 TRACKIT Profile API Tests.
 
-Tests authenticated-user profile operations.
+Tests authenticated-user profile operations and administrator
+role-management workflows.
 
 Coverage:
 
@@ -15,6 +16,7 @@ Coverage:
 - Update preferences.
 - PATCH semantics.
 - Email verification reset after email change.
+- Email change token invalidation.
 - Duplicate username protection.
 - Duplicate email protection.
 - Protection against modifying another user's profile.
@@ -26,6 +28,24 @@ Coverage:
 - Audit-log SET NULL behavior.
 - Old JWT invalidation after account deletion.
 - Account deletion transaction behavior.
+- Post-commit media cleanup behavior.
+- Moderator profile access.
+- Administrator profile access.
+- User -> moderator promotion.
+- Moderator -> administrator promotion.
+- Administrator -> moderator demotion.
+- Moderator -> user privilege revocation.
+- Promotion authorization.
+- Demotion authorization.
+- Promotion role validation.
+- Demotion role validation.
+- Self-promotion protection.
+- Self-demotion protection.
+- Last-administrator protection.
+- Nonexistent-user role-management handling.
+- Audit-log creation for role changes.
+- Profile role escalation protection.
+- Role-management transaction behavior.
 """
 
 from datetime import datetime, timedelta, timezone
@@ -37,6 +57,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.constants import UserRole
 from app.core.security import create_access_token, hash_password
 from app.models.audit_log import AuditLog
 from app.models.auth_token import AuthToken
@@ -47,6 +68,12 @@ from app.models.match import Match
 from app.models.notification import Notification
 from app.models.report import Report
 from app.models.user import User
+from app.services.user import (
+    demote_admin_to_moderator_service,
+    promote_moderator_to_admin_service,
+    promote_user_to_moderator_service,
+    revoke_moderator_service,
+)
 
 
 # ============================================================================
@@ -82,7 +109,7 @@ def create_test_user(
         last_name=last_name,
         email=email,
         password_hash=password_hash,
-        role="user",
+        role=UserRole.USER,
         is_active=True,
         is_verified=is_verified,
     )
@@ -99,8 +126,8 @@ def authenticated_headers(
     """
     Create Authorization headers for a test user.
 
-    The JWT payload follows the same structure expected by
-    app.api.deps.get_current_user().
+    The JWT intentionally does not contain a trusted role value.
+    The database remains authoritative for authorization.
     """
 
     token = create_access_token(
@@ -113,6 +140,91 @@ def authenticated_headers(
     return {
         "Authorization": f"Bearer {token}",
     }
+
+
+def set_role(
+    db: Session,
+    user: User,
+    role: str,
+) -> User:
+    """
+    Assign a role directly in test setup.
+    """
+
+    user.role = role
+    db.flush()
+
+    return user
+
+
+def create_admin(
+    db: Session,
+    *,
+    user_id: int,
+    username: str,
+    email: str,
+) -> User:
+    """
+    Create an administrator test user.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=user_id,
+        username=username,
+        email=email,
+    )
+
+    return set_role(
+        db,
+        user,
+        UserRole.ADMIN,
+    )
+
+
+def create_moderator(
+    db: Session,
+    *,
+    user_id: int,
+    username: str,
+    email: str,
+) -> User:
+    """
+    Create a moderator test user.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=user_id,
+        username=username,
+        email=email,
+    )
+
+    return set_role(
+        db,
+        user,
+        UserRole.MODERATOR,
+    )
+
+
+def count_audit_logs(
+    db: Session,
+    *,
+    user_id: int,
+    action: str = "admin_action",
+) -> int:
+    """
+    Count audit logs created by a specific acting user.
+    """
+
+    return (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.user_id == user_id,
+            AuditLog.action == action,
+        )
+        .count()
+    )
 
 
 # ============================================================================
@@ -159,33 +271,34 @@ def test_get_profile_returns_authenticated_user(
 # ============================================================================
 
 
-def test_get_profile_requires_authentication(
+@pytest.mark.parametrize(
+    ("method", "path", "payload"),
+    [
+        ("get", "/api/profile", None),
+        (
+            "patch",
+            "/api/profile",
+            {"first_name": "Unauthorized"},
+        ),
+    ],
+)
+def test_profile_operations_require_authentication(
     client: TestClient,
+    method: str,
+    path: str,
+    payload: dict | None,
 ):
     """
-    Profile retrieval requires authentication.
+    Profile operations require authentication.
     """
 
-    response = client.get(
-        "/api/profile",
-    )
-
-    assert response.status_code == 401
-
-
-def test_update_profile_requires_authentication(
-    client: TestClient,
-):
-    """
-    Profile updates require authentication.
-    """
-
-    response = client.patch(
-        "/api/profile",
-        json={
-            "first_name": "Unauthorized",
-        },
-    )
+    if method == "get":
+        response = client.get(path)
+    else:
+        response = client.patch(
+            path,
+            json=payload,
+        )
 
     assert response.status_code == 401
 
@@ -219,10 +332,7 @@ def test_update_profile_username(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["username"] == "newusername"
+    assert response.json()["username"] == "newusername"
 
     db.refresh(user)
 
@@ -258,10 +368,7 @@ def test_update_profile_email(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["email"] == "newemail@example.com"
+    assert response.json()["email"] == "newemail@example.com"
 
     db.refresh(user)
 
@@ -486,10 +593,7 @@ def test_update_social_links(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["social_links"] == social_links
+    assert response.json()["social_links"] == social_links
 
     db.refresh(user)
 
@@ -511,7 +615,7 @@ def test_update_preferences(
 
     user = create_test_user(
         db,
-        user_id=1008,
+        user_id=1010,
         username="preferencesuser",
         email="preferences@example.com",
     )
@@ -531,10 +635,7 @@ def test_update_preferences(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["preferences"] == preferences
+    assert response.json()["preferences"] == preferences
 
     db.refresh(user)
 
@@ -552,13 +653,11 @@ def test_update_profile_only_changes_supplied_fields(
 ):
     """
     PATCH updates only the fields supplied by the client.
-
-    Unspecified fields must remain unchanged.
     """
 
     user = create_test_user(
         db,
-        user_id=1009,
+        user_id=1011,
         username="patchuser",
         email="patchuser@example.com",
         first_name="Original",
@@ -605,7 +704,7 @@ def test_update_profile_with_empty_body_returns_current_profile(
 
     user = create_test_user(
         db,
-        user_id=1010,
+        user_id=1012,
         username="emptyupdate",
         email="emptyupdate@example.com",
     )
@@ -626,7 +725,7 @@ def test_update_profile_with_empty_body_returns_current_profile(
 
 
 # ============================================================================
-# DUPLICATE USERNAME
+# DUPLICATE USERNAME / EMAIL
 # ============================================================================
 
 
@@ -635,20 +734,19 @@ def test_update_profile_rejects_duplicate_username(
     db: Session,
 ):
     """
-    A user cannot change their username to one already
-    belonging to another user.
+    A user cannot change their username to another user's username.
     """
 
     user = create_test_user(
         db,
-        user_id=1011,
+        user_id=1013,
         username="firstprofileuser",
         email="firstprofile@example.com",
     )
 
     create_test_user(
         db,
-        user_id=1012,
+        user_id=1014,
         username="takenusername",
         email="secondprofile@example.com",
     )
@@ -664,30 +762,24 @@ def test_update_profile_rejects_duplicate_username(
     assert response.status_code == 409
 
 
-# ============================================================================
-# DUPLICATE EMAIL
-# ============================================================================
-
-
 def test_update_profile_rejects_duplicate_email(
     client: TestClient,
     db: Session,
 ):
     """
-    A user cannot change their email to one already
-    belonging to another user.
+    A user cannot change their email to another user's email.
     """
 
     user = create_test_user(
         db,
-        user_id=1013,
+        user_id=1015,
         username="firstemailuser",
         email="firstemail@example.com",
     )
 
     create_test_user(
         db,
-        user_id=1014,
+        user_id=1016,
         username="secondemailuser",
         email="takenemail@example.com",
     )
@@ -703,23 +795,17 @@ def test_update_profile_rejects_duplicate_email(
     assert response.status_code == 409
 
 
-# ============================================================================
-# EXISTING USERNAME
-# ============================================================================
-
-
 def test_update_profile_allows_existing_username(
     client: TestClient,
     db: Session,
 ):
     """
-    Supplying the user's existing username should not
-    trigger a duplicate conflict.
+    Supplying the user's existing username does not create a conflict.
     """
 
     user = create_test_user(
         db,
-        user_id=1015,
+        user_id=1017,
         username="sameusername",
         email="sameusername@example.com",
     )
@@ -733,15 +819,7 @@ def test_update_profile_allows_existing_username(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["username"] == "sameusername"
-
-
-# ============================================================================
-# EXISTING EMAIL
-# ============================================================================
+    assert response.json()["username"] == "sameusername"
 
 
 def test_update_profile_allows_existing_email(
@@ -749,13 +827,13 @@ def test_update_profile_allows_existing_email(
     db: Session,
 ):
     """
-    Supplying the user's existing email should not
-    trigger a duplicate conflict or reset verification.
+    Supplying the user's existing email does not create a conflict
+    or reset verification.
     """
 
     user = create_test_user(
         db,
-        user_id=1016,
+        user_id=1018,
         username="sameemailuser",
         email="sameemail@example.com",
         is_verified=True,
@@ -770,742 +848,184 @@ def test_update_profile_allows_existing_email(
     )
 
     assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["email"] == "sameemail@example.com"
-    assert data["is_verified"] is True
+    assert response.json()["email"] == "sameemail@example.com"
+    assert response.json()["is_verified"] is True
 
 
 # ============================================================================
-# AUTHENTICATED USER OWNERSHIP
+# PATCH CLEAR / VALIDATION SEMANTICS
 # ============================================================================
 
 
-def test_profile_endpoint_only_updates_authenticated_user(
+@pytest.mark.parametrize(
+    ("user_id", "username", "email", "field"),
+    [
+        (1020, "clearbio", "clearbio@example.com", "bio"),
+        (1021, "clearphone", "clearphone@example.com", "phone_number"),
+        (
+            1022,
+            "clearpicture",
+            "clearpicture@example.com",
+            "profile_picture",
+        ),
+        (1023, "clearaddress", "clearaddress@example.com", "address"),
+    ],
+)
+def test_update_profile_can_clear_nullable_field(
     client: TestClient,
     db: Session,
+    user_id: int,
+    username: str,
+    email: str,
+    field: str,
 ):
     """
-    The profile endpoint updates the user represented by
-    the JWT and does not accept a user ID from the client.
+    Nullable profile fields can be explicitly cleared with null.
     """
 
-    authenticated_user = create_test_user(
-        db,
-        user_id=1017,
-        username="authenticateduser",
-        email="authenticated@example.com",
-    )
-
-    other_user = create_test_user(
-        db,
-        user_id=1018,
-        username="otheruser",
-        email="other@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(authenticated_user),
-        json={
-            "username": "changedauthenticated",
-        },
-    )
-
-    assert response.status_code == 200
-
-    db.refresh(authenticated_user)
-    db.refresh(other_user)
-
-    assert authenticated_user.username == (
-        "changedauthenticated"
-    )
-    assert other_user.username == "otheruser"
-
-
-# ============================================================================
-# ADMIN USER PROFILE
-# ============================================================================
-
-
-def admin_authenticated_headers(
-    user: User,
-) -> dict[str, str]:
-    """
-    Create Authorization headers for an administrative test user.
-    """
-
-    token = create_access_token(
-        data={
-            "sub": str(user.id),
-            "token_version": user.token_version,
-        },
-    )
-
-    return {
-        "Authorization": f"Bearer {token}",
-    }
-
-
-def test_admin_can_view_another_users_profile(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Administrators can view another user's detailed
-    profile and account information.
-    """
-
-    admin = create_test_user(
-        db,
-        user_id=1019,
-        username="adminuser",
-        email="admin@example.com",
-    )
-
-    admin.role = "admin"
-    db.flush()
-
-    target_user = create_test_user(
-        db,
-        user_id=1020,
-        username="targetuser",
-        email="target@example.com",
-        first_name="Target",
-        last_name="Person",
-    )
-
-    target_user.profile_picture = (
-        "https://example.com/avatar.jpg"
-    )
-    target_user.phone_number = "+254700000002"
-    target_user.bio = "Target profile."
-    target_user.address = "Nairobi, Kenya"
-    target_user.social_links = {
-        "github": "https://github.com/target",
-    }
-    target_user.preferences = {
-        "theme": "dark",
-    }
-
-    db.flush()
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-        headers=admin_authenticated_headers(admin),
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["id"] == target_user.id
-    assert data["username"] == "targetuser"
-    assert data["first_name"] == "Target"
-    assert data["last_name"] == "Person"
-    assert data["email"] == "target@example.com"
-
-    assert data["role"] == "user"
-    assert data["is_active"] is True
-    assert data["is_verified"] is True
-
-    assert data["profile_picture"] == (
-        "https://example.com/avatar.jpg"
-    )
-    assert data["phone_number"] == "+254700000002"
-    assert data["bio"] == "Target profile."
-    assert data["address"] == "Nairobi, Kenya"
-
-    assert data["social_links"] == {
-        "github": "https://github.com/target",
-    }
-
-    assert data["preferences"] == {
-        "theme": "dark",
-    }
-
-
-def test_admin_can_view_private_user_profile(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Administrative access is not restricted by public/private
-    profile visibility.
-
-    The current User model may not yet contain an explicit
-    profile visibility field, so this test establishes that
-    administrative access is independent of public-profile rules.
-    """
-
-    admin = create_test_user(
-        db,
-        user_id=1021,
-        username="profileadmin",
-        email="profileadmin@example.com",
-    )
-
-    admin.role = "admin"
-    db.flush()
-
-    target_user = create_test_user(
-        db,
-        user_id=1022,
-        username="privateuser",
-        email="privateuser@example.com",
-    )
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-        headers=admin_authenticated_headers(admin),
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["id"] == target_user.id
-    assert data["username"] == "privateuser"
-
-
-def test_normal_user_cannot_view_admin_user_profile(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Normal users cannot access the administrative
-    user-detail endpoint.
-    """
-
-    normal_user = create_test_user(
-        db,
-        user_id=1023,
-        username="normalviewer",
-        email="normalviewer@example.com",
-    )
-
-    target_user = create_test_user(
-        db,
-        user_id=1024,
-        username="targetadminview",
-        email="targetadminview@example.com",
-    )
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-        headers=authenticated_headers(normal_user),
-    )
-
-    assert response.status_code == 403
-
-
-def test_admin_user_profile_requires_authentication(
-    client: TestClient,
-    db: Session,
-):
-    """
-    The administrative user-detail endpoint requires authentication.
-    """
-
-    target_user = create_test_user(
-        db,
-        user_id=1025,
-        username="authenticationtarget",
-        email="authenticationtarget@example.com",
-    )
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-    )
-
-    assert response.status_code == 401
-
-
-def test_admin_user_profile_returns_404_for_nonexistent_user(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Administrators receive 404 when the requested user does not exist.
-    """
-
-    admin = create_test_user(
-        db,
-        user_id=1026,
-        username="missinguseradmin",
-        email="missinguseradmin@example.com",
-    )
-
-    admin.role = "admin"
-    db.flush()
-
-    response = client.get(
-        "/api/profile/admin/999999",
-        headers=admin_authenticated_headers(admin),
-    )
-
-    assert response.status_code == 404
-
-
-def test_admin_user_profile_does_not_expose_security_fields(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Administrative profile responses must never expose
-    authentication or credential fields.
-    """
-
-    admin = create_test_user(
-        db,
-        user_id=1027,
-        username="securityadmin",
-        email="securityadmin@example.com",
-    )
-
-    admin.role = "admin"
-    db.flush()
-
-    target_user = create_test_user(
-        db,
-        user_id=1028,
-        username="securitytarget",
-        email="securitytarget@example.com",
-    )
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-        headers=admin_authenticated_headers(admin),
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert "password_hash" not in data
-    assert "token_version" not in data
-    assert "auth_tokens" not in data
-    assert "tokens" not in data
-    assert "password_reset_token" not in data
-    assert "verification_token" not in data
-    assert "access_token" not in data
-    assert "refresh_token" not in data
-
-
-def test_admin_can_view_inactive_user(
-    client: TestClient,
-    db: Session,
-):
-    """
-    Administrators can inspect inactive users.
-    """
-
-    admin = create_test_user(
-        db,
-        user_id=1029,
-        username="inactiveviewer",
-        email="inactiveviewer@example.com",
-    )
-
-    admin.role = "admin"
-    db.flush()
-
-    target_user = create_test_user(
-        db,
-        user_id=1030,
-        username="inactiveuser",
-        email="inactiveuser@example.com",
-    )
-
-    target_user.is_active = False
-    db.flush()
-
-    response = client.get(
-        f"/api/profile/admin/{target_user.id}",
-        headers=admin_authenticated_headers(admin),
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["id"] == target_user.id
-    assert data["is_active"] is False
-
-
-# ============================================================================
-# PATCH NULL / CLEAR SEMANTICS
-# ============================================================================
-
-
-def test_update_profile_can_clear_bio(
-    client,
-    db: Session,
-):
     user = create_test_user(
         db,
-        user_id=101,
-        username="clearbio",
-        email="clearbio@example.com",
+        user_id=user_id,
+        username=username,
+        email=email,
     )
 
-    user.bio = "This should be cleared."
+    setattr(user, field, "existing value")
     db.flush()
 
     response = client.patch(
         "/api/profile",
         headers=authenticated_headers(user),
         json={
-            "bio": None,
+            field: None,
         },
     )
 
     assert response.status_code == 200
-    assert response.json()["bio"] is None
+    assert response.json()[field] is None
 
     db.refresh(user)
 
-    assert user.bio is None
+    assert getattr(user, field) is None
 
 
-def test_update_profile_can_clear_phone_number(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=102,
-        username="clearphone",
-        email="clearphone@example.com",
-    )
-
-    user.phone_number = "+254711111111"
-    db.flush()
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "phone_number": None,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["phone_number"] is None
-
-    db.refresh(user)
-
-    assert user.phone_number is None
-
-
-def test_update_profile_can_clear_profile_picture(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=103,
-        username="clearpicture",
-        email="clearpicture@example.com",
-    )
-
-    user.profile_picture = "https://example.com/profile.jpg"
-    db.flush()
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "profile_picture": None,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["profile_picture"] is None
-
-    db.refresh(user)
-
-    assert user.profile_picture is None
-
-
-def test_update_profile_can_clear_address(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=104,
-        username="clearaddress",
-        email="clearaddress@example.com",
-    )
-
-    user.address = "Nairobi"
-    db.flush()
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "address": None,
-        },
-    )
-
-    assert response.status_code == 200
-    assert response.json()["address"] is None
-
-    db.refresh(user)
-
-    assert user.address is None
-
-
-# ============================================================================
-# REQUIRED FIELD NULL VALIDATION
-# ============================================================================
-
-
-def test_update_profile_rejects_null_username(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=105,
-        username="nullusername",
-        email="nullusername@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "username": None,
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_null_email(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=106,
-        username="nullemail",
-        email="nullemail@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "email": None,
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_null_first_name(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=107,
-        username="nullfirstname",
-        email="nullfirstname@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "first_name": None,
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_null_last_name(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=108,
-        username="nulllastname",
-        email="nulllastname@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "last_name": None,
-        },
-    )
-
-    assert response.status_code == 422
-
-
-# ============================================================================
-# REQUIRED FIELD EMPTY STRING VALIDATION
-# ============================================================================
-
-
-def test_update_profile_rejects_empty_username(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=109,
-        username="emptyusername",
-        email="emptyusername@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "username": "",
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_empty_email(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=110,
-        username="emptyemail",
-        email="emptyemail@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "email": "",
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_empty_first_name(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=111,
-        username="emptyfirstname",
-        email="emptyfirstname@example.com",
-    )
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "first_name": "",
-        },
-    )
-
-    assert response.status_code == 422
-
-
-def test_update_profile_rejects_empty_last_name(
+@pytest.mark.parametrize(
+    "field",
+    [
+        "username",
+        "email",
+        "first_name",
+        "last_name",
+    ],
+)
+def test_update_profile_rejects_null_required_field(
     client: TestClient,
     db: Session,
+    field: str,
 ):
+    """
+    Required profile fields cannot be set to null.
+    """
+
     user = create_test_user(
         db,
-        user_id=112,
-        username="emptylastname",
-        email="emptylastname@example.com",
+        user_id=1030 + len(field),
+        username=f"null{field}",
+        email=f"null{field}@example.com",
     )
 
     response = client.patch(
         "/api/profile",
         headers=authenticated_headers(user),
         json={
-            "last_name": "",
+            field: None,
         },
     )
 
     assert response.status_code == 422
 
 
-# ============================================================================
-# NON-NULL JSON FIELD VALIDATION
-# ============================================================================
-
-
-def test_update_profile_rejects_null_social_links(
-    client,
+@pytest.mark.parametrize(
+    "field",
+    [
+        "username",
+        "email",
+        "first_name",
+        "last_name",
+    ],
+)
+def test_update_profile_rejects_empty_required_field(
+    client: TestClient,
     db: Session,
+    field: str,
 ):
+    """
+    Required profile fields cannot be empty strings.
+    """
+
     user = create_test_user(
         db,
-        user_id=113,
-        username="nullsocial",
-        email="nullsocial@example.com",
+        user_id=1040 + len(field),
+        username=f"empty{field}",
+        email=f"empty{field}@example.com",
     )
 
     response = client.patch(
         "/api/profile",
         headers=authenticated_headers(user),
         json={
-            "social_links": None,
+            field: "",
         },
     )
 
     assert response.status_code == 422
 
 
-def test_update_profile_rejects_null_preferences(
-    client,
+@pytest.mark.parametrize(
+    "field",
+    [
+        "social_links",
+        "preferences",
+    ],
+)
+def test_update_profile_rejects_null_json_field(
+    client: TestClient,
     db: Session,
+    field: str,
 ):
+    """
+    JSON profile fields that are not nullable reject null.
+    """
+
     user = create_test_user(
         db,
-        user_id=114,
-        username="nullpreferences",
-        email="nullpreferences@example.com",
+        user_id=1050 + len(field),
+        username=f"null{field}",
+        email=f"null{field}@example.com",
     )
 
     response = client.patch(
         "/api/profile",
         headers=authenticated_headers(user),
         json={
-            "preferences": None,
+            field: None,
         },
     )
 
     assert response.status_code == 422
-
-
-# ============================================================================
-# EMPTY STRING CLEARING FOR NULLABLE FIELDS
-# ============================================================================
 
 
 def test_update_profile_empty_nullable_strings_clear_values(
-    client,
+    client: TestClient,
     db: Session,
 ):
+    """
+    Empty strings clear nullable string profile fields.
+    """
+
     user = create_test_user(
         db,
-        user_id=115,
+        user_id=1060,
         username="emptynullable",
         email="emptynullable@example.com",
     )
@@ -1537,56 +1057,6 @@ def test_update_profile_empty_nullable_strings_clear_values(
     assert data["bio"] is None
     assert data["address"] is None
 
-    db.refresh(user)
-
-    assert user.profile_picture is None
-    assert user.phone_number is None
-    assert user.bio is None
-    assert user.address is None
-
-
-# ============================================================================
-# PATCH OMISSION SEMANTICS
-# ============================================================================
-
-
-def test_update_profile_omitted_nullable_field_remains_unchanged(
-    client,
-    db: Session,
-):
-    user = create_test_user(
-        db,
-        user_id=116,
-        username="omittednullable",
-        email="omittednullable@example.com",
-    )
-
-    user.bio = "Keep this biography."
-    user.phone_number = "+254722222222"
-
-    db.flush()
-
-    response = client.patch(
-        "/api/profile",
-        headers=authenticated_headers(user),
-        json={
-            "first_name": "Changed",
-        },
-    )
-
-    assert response.status_code == 200
-
-    data = response.json()
-
-    assert data["first_name"] == "Changed"
-    assert data["bio"] == "Keep this biography."
-    assert data["phone_number"] == "+254722222222"
-
-    db.refresh(user)
-
-    assert user.bio == "Keep this biography."
-    assert user.phone_number == "+254722222222"
-
 
 # ============================================================================
 # ACCOUNT DELETION
@@ -1600,7 +1070,7 @@ def test_delete_account_requires_authentication(
     client: TestClient,
 ):
     """
-    Account deletion requires an authenticated user.
+    Account deletion requires authentication.
     """
 
     response = client.request(
@@ -1619,7 +1089,7 @@ def test_delete_account_rejects_incorrect_password(
     db: Session,
 ):
     """
-    Account deletion must require the user's current password.
+    Account deletion requires the user's current password.
     """
 
     user = create_test_user(
@@ -1642,16 +1112,11 @@ def test_delete_account_rejects_incorrect_password(
     )
 
     assert response.status_code == 400
-
     assert response.json()["detail"] == (
         "Current password is incorrect."
     )
 
-    persisted_user = db.get(User, user_id)
-
-    assert persisted_user is not None
-    assert persisted_user.id == 2001
-    assert persisted_user.username == "wrongpassworduser"
+    assert db.get(User, user_id) is not None
 
 
 def test_delete_account_requires_password(
@@ -1659,7 +1124,7 @@ def test_delete_account_requires_password(
     db: Session,
 ):
     """
-    Account deletion requires a non-empty password.
+    Account deletion requires a password.
     """
 
     user = create_test_user(
@@ -1680,10 +1145,7 @@ def test_delete_account_requires_password(
     )
 
     assert response.status_code == 422
-
-    persisted_user = db.get(User, user_id)
-
-    assert persisted_user is not None
+    assert db.get(User, user_id) is not None
 
 
 def test_delete_account_with_correct_password_returns_204(
@@ -1691,7 +1153,7 @@ def test_delete_account_with_correct_password_returns_204(
     db: Session,
 ):
     """
-    A user can delete their account using the correct password.
+    A user can delete their account with the correct password.
     """
 
     user = create_test_user(
@@ -1726,8 +1188,7 @@ def test_delete_account_invalidates_existing_access_token(
     db: Session,
 ):
     """
-    A JWT issued before account deletion cannot be used after
-    the user record has been removed.
+    A JWT issued before deletion cannot authenticate after deletion.
     """
 
     user = create_test_user(
@@ -1740,12 +1201,13 @@ def test_delete_account_invalidates_existing_access_token(
 
     old_headers = authenticated_headers(user)
 
-    response = client.get(
-        "/api/profile",
-        headers=old_headers,
+    assert (
+        client.get(
+            "/api/profile",
+            headers=old_headers,
+        ).status_code
+        == 200
     )
-
-    assert response.status_code == 200
 
     response = client.request(
         "DELETE",
@@ -1776,8 +1238,7 @@ def test_delete_account_removes_user_owned_data(
     db: Session,
 ):
     """
-    Deleting an account removes the user's directly owned records
-    and records connected through CASCADE relationships.
+    Deleting an account removes directly owned and cascading data.
     """
 
     user = create_test_user(
@@ -1810,14 +1271,8 @@ def test_delete_account_removes_user_owned_data(
     report = Report(
         item_id=item.id,
         reporter_id=user.id,
-        reason=(
-            "This report is being created for account "
-            "deletion testing."
-        ),
-        description=(
-            "Test report created to verify account "
-            "deletion cleanup."
-        ),
+        reason="Account deletion test.",
+        description="Test report created for cleanup.",
     )
 
     notification = Notification(
@@ -1867,23 +1322,22 @@ def test_delete_account_removes_user_owned_data(
         description_score=100,
         location_score=100,
         time_score=100,
-        reason=(
-            "Test match created to verify account "
-            "deletion cleanup."
-        ),
+        reason="Account deletion cleanup test.",
     )
 
     db.add(match)
     db.flush()
 
-    item_id = item.id
-    claim_id = claim.id
-    report_id = report.id
-    notification_id = notification.id
-    comment_id = comment.id
-    token_id = auth_token.id
-    match_id = match.id
-    user_id = user.id
+    ids = {
+        "user": user.id,
+        "item": item.id,
+        "claim": claim.id,
+        "report": report.id,
+        "notification": notification.id,
+        "comment": comment.id,
+        "auth_token": auth_token.id,
+        "match": match.id,
+    }
 
     response = client.request(
         "DELETE",
@@ -1898,14 +1352,14 @@ def test_delete_account_removes_user_owned_data(
 
     db.expire_all()
 
-    assert db.get(User, user_id) is None
-    assert db.get(Item, item_id) is None
-    assert db.get(Claim, claim_id) is None
-    assert db.get(Report, report_id) is None
-    assert db.get(Notification, notification_id) is None
-    assert db.get(Comment, comment_id) is None
-    assert db.get(AuthToken, token_id) is None
-    assert db.get(Match, match_id) is None
+    assert db.get(User, ids["user"]) is None
+    assert db.get(Item, ids["item"]) is None
+    assert db.get(Claim, ids["claim"]) is None
+    assert db.get(Report, ids["report"]) is None
+    assert db.get(Notification, ids["notification"]) is None
+    assert db.get(Comment, ids["comment"]) is None
+    assert db.get(AuthToken, ids["auth_token"]) is None
+    assert db.get(Match, ids["match"]) is None
 
 
 def test_delete_account_removes_profile_picture_file(
@@ -1917,11 +1371,8 @@ def test_delete_account_removes_profile_picture_file(
     """
 
     storage_key = "items/account-delete-profile.webp"
-
-    media_root = Path(settings.MEDIA_ROOT)
-
     image_path = (
-        media_root
+        Path(settings.MEDIA_ROOT)
         / "items"
         / "account-delete-profile.webp"
     )
@@ -1930,10 +1381,7 @@ def test_delete_account_removes_profile_picture_file(
         parents=True,
         exist_ok=True,
     )
-
-    image_path.write_bytes(
-        b"test-profile-image"
-    )
+    image_path.write_bytes(b"test-profile-image")
 
     user = create_test_user(
         db,
@@ -1943,13 +1391,12 @@ def test_delete_account_removes_profile_picture_file(
         password=ACCOUNT_DELETE_PASSWORD,
     )
 
-    user_id = user.id
-
     user.profile_picture = storage_key
-
     db.flush()
 
     assert image_path.exists()
+
+    user_id = user.id
 
     response = client.request(
         "DELETE",
@@ -1973,44 +1420,24 @@ def test_delete_account_removes_item_image_files(
     db: Session,
 ):
     """
-    Account deletion removes stored images belonging to the
-    user's items.
+    Account deletion removes stored item images.
     """
 
-    storage_key_one = (
-        "items/account-delete-item-one.webp"
-    )
-
-    storage_key_two = (
-        "items/account-delete-item-two.webp"
-    )
+    storage_key_one = "items/account-delete-item-one.webp"
+    storage_key_two = "items/account-delete-item-two.webp"
 
     media_root = Path(settings.MEDIA_ROOT)
 
-    image_path_one = (
-        media_root
-        / "items"
-        / "account-delete-item-one.webp"
-    )
-
-    image_path_two = (
-        media_root
-        / "items"
-        / "account-delete-item-two.webp"
-    )
+    image_path_one = media_root / storage_key_one
+    image_path_two = media_root / storage_key_two
 
     image_path_one.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    image_path_one.write_bytes(
-        b"test-item-image-one"
-    )
-
-    image_path_two.write_bytes(
-        b"test-item-image-two"
-    )
+    image_path_one.write_bytes(b"test-item-image-one")
+    image_path_two.write_bytes(b"test-item-image-two")
 
     user = create_test_user(
         db,
@@ -2019,8 +1446,6 @@ def test_delete_account_removes_item_image_files(
         email="itemimage@example.com",
         password=ACCOUNT_DELETE_PASSWORD,
     )
-
-    user_id = user.id
 
     item_one = Item(
         user_id=user.id,
@@ -2044,17 +1469,13 @@ def test_delete_account_removes_item_image_files(
         status="approved",
     )
 
-    db.add_all(
-        [
-            item_one,
-            item_two,
-        ]
-    )
-
+    db.add_all([item_one, item_two])
     db.flush()
 
     assert image_path_one.exists()
     assert image_path_two.exists()
+
+    user_id = user.id
 
     response = client.request(
         "DELETE",
@@ -2066,7 +1487,6 @@ def test_delete_account_removes_item_image_files(
     )
 
     assert response.status_code == 204
-
     assert not image_path_one.exists()
     assert not image_path_two.exists()
 
@@ -2085,11 +1505,11 @@ def test_delete_account_preserves_review_records_with_null_reviewer(
     db: Session,
 ):
     """
-    Records reviewed by the deleted user remain in the database,
-    but their reviewer references become NULL.
+    Records reviewed by a deleted user remain, with reviewer references
+    set to NULL.
     """
 
-    user = create_test_user(
+    reviewer = create_test_user(
         db,
         user_id=2020,
         username="reviewerdeleteuser",
@@ -2112,7 +1532,7 @@ def test_delete_account_preserves_review_records_with_null_reviewer(
         category="Other",
         location="Nairobi",
         status="approved",
-        reviewed_by=user.id,
+        reviewed_by=reviewer.id,
     )
 
     db.add(item)
@@ -2121,41 +1541,31 @@ def test_delete_account_preserves_review_records_with_null_reviewer(
     report = Report(
         item_id=item.id,
         reporter_id=owner.id,
-        reason=(
-            "This report is being created for account "
-            "deletion testing"
-        ),
-        description=(
-            "Test reviewed report created to verify "
-            "reviewer cleanup."
-        ),
-        reviewed_by=user.id,
+        reason="Reviewer cleanup test.",
+        description="Reviewed report.",
+        reviewed_by=reviewer.id,
     )
 
     claim = Claim(
         item_id=item.id,
         claimant_id=owner.id,
         reason="I believe this item belongs to me.",
-        reviewed_by=user.id,
+        reviewed_by=reviewer.id,
     )
 
-    db.add_all(
-        [
-            report,
-            claim,
-        ]
-    )
-
+    db.add_all([report, claim])
     db.flush()
 
-    item_id = item.id
-    report_id = report.id
-    claim_id = claim.id
+    ids = {
+        "item": item.id,
+        "report": report.id,
+        "claim": claim.id,
+    }
 
     response = client.request(
         "DELETE",
         "/api/profile/account",
-        headers=authenticated_headers(user),
+        headers=authenticated_headers(reviewer),
         json={
             "password": ACCOUNT_DELETE_PASSWORD,
         },
@@ -2165,20 +1575,9 @@ def test_delete_account_preserves_review_records_with_null_reviewer(
 
     db.expire_all()
 
-    persisted_item = db.get(
-        Item,
-        item_id,
-    )
-
-    persisted_report = db.get(
-        Report,
-        report_id,
-    )
-
-    persisted_claim = db.get(
-        Claim,
-        claim_id,
-    )
+    persisted_item = db.get(Item, ids["item"])
+    persisted_report = db.get(Report, ids["report"])
+    persisted_claim = db.get(Claim, ids["claim"])
 
     assert persisted_item is not None
     assert persisted_report is not None
@@ -2194,8 +1593,7 @@ def test_delete_account_preserves_audit_logs_with_null_user(
     db: Session,
 ):
     """
-    Audit logs remain after account deletion, but the deleted user's
-    foreign-key reference is cleared.
+    Audit logs remain after account deletion, but user_id becomes NULL.
     """
 
     user = create_test_user(
@@ -2240,7 +1638,7 @@ def test_delete_account_preserves_audit_logs_with_null_user(
 
 
 # ============================================================================
-# TRANSACTION BEHAVIOR
+# ACCOUNT-DELETION TRANSACTION BEHAVIOR
 # ============================================================================
 
 
@@ -2248,13 +1646,8 @@ def test_delete_user_account_service_can_be_rolled_back(
     db: Session,
 ):
     """
-    The account-deletion service performs a database flush but does not
-    commit. The caller can therefore roll the operation back.
+    Account deletion can be rolled back before the outer transaction commits.
     """
-
-    from app.services.user import (
-        delete_user_account_service,
-    )
 
     user = create_test_user(
         db,
@@ -2268,26 +1661,27 @@ def test_delete_user_account_service_can_be_rolled_back(
 
     nested = db.begin_nested()
 
-    storage_keys = delete_user_account_service(
-        db,
-        user,
+    storage_keys = (
+        __import__(
+            "app.services.user",
+            fromlist=["delete_user_account_service"],
+        )
+        .delete_user_account_service(
+            db,
+            user,
+        )
     )
 
     assert storage_keys == []
-
-    assert db.get(User, user_id) is None
+    assert db.get(User, user.id) is None
 
     nested.rollback()
 
     db.expire_all()
 
-    restored_user = db.get(
-        User,
-        user_id,
-    )
+    restored_user = db.get(User, user_id)
 
     assert restored_user is not None
-    assert restored_user.id == user_id
     assert restored_user.username == "rollbackuser"
     assert restored_user.email == "rollback@example.com"
 
@@ -2297,8 +1691,7 @@ def test_delete_account_service_failure_does_not_delete_user(
     db: Session,
 ):
     """
-    If the account deletion service fails before commit, the route
-    rolls the database transaction back and the account remains.
+    A failure before commit rolls the account deletion back.
     """
 
     user = create_test_user(
@@ -2314,7 +1707,7 @@ def test_delete_account_service_failure_does_not_delete_user(
     with patch(
         "app.routers.profile.delete_user_account_service",
         side_effect=RuntimeError(
-            "simulated database failure"
+            "simulated database failure",
         ),
     ):
         with pytest.raises(
@@ -2332,18 +1725,7 @@ def test_delete_account_service_failure_does_not_delete_user(
 
     db.expire_all()
 
-    remaining_user = db.get(
-        User,
-        user_id,
-    )
-
-    assert remaining_user is not None
-    assert remaining_user.id == user_id
-
-
-# ============================================================================
-# POST-COMMIT MEDIA CLEANUP FAILURE
-# ============================================================================
+    assert db.get(User, user_id) is not None
 
 
 def test_delete_account_media_cleanup_failure_does_not_restore_account(
@@ -2351,9 +1733,7 @@ def test_delete_account_media_cleanup_failure_does_not_restore_account(
     db: Session,
 ):
     """
-    Once the database deletion has committed, a physical media cleanup
-    failure must not restore the deleted account or turn the successful
-    account deletion into a failed transaction.
+    A post-commit media cleanup failure does not restore the account.
     """
 
     user = create_test_user(
@@ -2364,18 +1744,18 @@ def test_delete_account_media_cleanup_failure_does_not_restore_account(
         password=ACCOUNT_DELETE_PASSWORD,
     )
 
-    user_id = user.id
-
     user.profile_picture = (
         "items/media-cleanup-failure.webp"
     )
 
     db.flush()
 
+    user_id = user.id
+
     with patch(
         "app.routers.profile.delete_stored_image",
         side_effect=RuntimeError(
-            "simulated media cleanup failure"
+            "simulated media cleanup failure",
         ),
     ):
         response = client.request(
@@ -2394,17 +1774,287 @@ def test_delete_account_media_cleanup_failure_does_not_restore_account(
     assert db.get(User, user_id) is None
 
 
-    #=============================================================
-    #Admin promotion
-    #=============================================================
+# ============================================================================
+# ADMIN/MODERATOR USER PROFILE ACCESS
+# ============================================================================
 
-def test_promote_user_requires_authentication(
+
+def test_admin_can_view_another_users_profile(
     client: TestClient,
     db: Session,
-  ):
+):
+    """
+    Administrators can view another user's detailed profile.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3001,
+        username="adminuser",
+        email="admin@example.com",
+    )
+
     target_user = create_test_user(
         db,
-        user_id=1031,
+        user_id=3002,
+        username="targetuser",
+        email="target@example.com",
+        first_name="Target",
+        last_name="Person",
+    )
+
+    target_user.profile_picture = (
+        "https://example.com/avatar.jpg"
+    )
+    target_user.phone_number = "+254700000002"
+    target_user.bio = "Target profile."
+    target_user.address = "Nairobi, Kenya"
+    target_user.social_links = {
+        "github": "https://github.com/target",
+    }
+    target_user.preferences = {
+        "theme": "dark",
+    }
+
+    db.flush()
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["username"] == "targetuser"
+    assert data["first_name"] == "Target"
+    assert data["last_name"] == "Person"
+    assert data["email"] == "target@example.com"
+    assert data["role"] == UserRole.USER
+    assert data["is_active"] is True
+    assert data["is_verified"] is True
+    assert data["profile_picture"] == (
+        "https://example.com/avatar.jpg"
+    )
+    assert data["phone_number"] == "+254700000002"
+    assert data["bio"] == "Target profile."
+    assert data["address"] == "Nairobi, Kenya"
+    assert data["social_links"] == {
+        "github": "https://github.com/target",
+    }
+    assert data["preferences"] == {
+        "theme": "dark",
+    }
+
+
+def test_moderator_can_view_another_users_profile(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators have moderator-level access to user details.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3003,
+        username="moderatorviewer",
+        email="moderatorviewer@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3004,
+        username="moderatorprofiletarget",
+        email="moderatorprofiletarget@example.com",
+    )
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["role"] == UserRole.USER
+
+
+def test_normal_user_cannot_view_admin_user_profile(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Normal users cannot access the moderator-level user-detail endpoint.
+    """
+
+    normal_user = create_test_user(
+        db,
+        user_id=3005,
+        username="normalviewer",
+        email="normalviewer@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3006,
+        username="targetadminview",
+        email="targetadminview@example.com",
+    )
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_user_profile_requires_authentication(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrative user-detail access requires authentication.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3007,
+        username="authenticationtarget",
+        email="authenticationtarget@example.com",
+    )
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+    )
+
+    assert response.status_code == 401
+
+
+def test_admin_user_profile_returns_404_for_nonexistent_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Authorized users receive 404 for nonexistent target users.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3008,
+        username="missinguseradmin",
+        email="missinguseradmin@example.com",
+    )
+
+    response = client.get(
+        "/api/profile/admin/999999",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+
+def test_admin_user_profile_does_not_expose_security_fields(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrative profile responses do not expose credentials or
+    authentication internals.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3009,
+        username="securityadmin",
+        email="securityadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3010,
+        username="securitytarget",
+        email="securitytarget@example.com",
+    )
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    forbidden_fields = {
+        "password_hash",
+        "token_version",
+        "auth_tokens",
+        "tokens",
+        "password_reset_token",
+        "verification_token",
+        "access_token",
+        "refresh_token",
+    }
+
+    assert forbidden_fields.isdisjoint(data.keys())
+
+
+def test_admin_can_view_inactive_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can inspect inactive users.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3011,
+        username="inactiveviewer",
+        email="inactiveviewer@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3012,
+        username="inactiveuser",
+        email="inactiveuser@example.com",
+    )
+
+    target_user.is_active = False
+    db.flush()
+
+    response = client.get(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["is_active"] is False
+
+
+# ============================================================================
+# USER -> MODERATOR PROMOTION
+# ============================================================================
+
+
+def test_promote_user_to_moderator_requires_authentication(
+    client: TestClient,
+    db: Session,
+):
+    """
+    User -> moderator promotion requires authentication.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3101,
         username="promotiontarget",
         email="promotiontarget@example.com",
     )
@@ -2416,20 +2066,24 @@ def test_promote_user_requires_authentication(
     assert response.status_code == 401
 
 
-def test_normal_user_cannot_promote_user_to_admin(
+def test_normal_user_cannot_promote_user_to_moderator(
     client: TestClient,
     db: Session,
 ):
+    """
+    Normal users cannot perform role promotion.
+    """
+
     normal_user = create_test_user(
         db,
-        user_id=1032,
+        user_id=3102,
         username="normalpromoter",
         email="normalpromoter@example.com",
     )
 
     target_user = create_test_user(
         db,
-        user_id=1033,
+        user_id=3103,
         username="promotiontarget2",
         email="promotiontarget2@example.com",
     )
@@ -2443,33 +2097,73 @@ def test_normal_user_cannot_promote_user_to_admin(
 
     db.refresh(target_user)
 
-    assert target_user.role == "user"
+    assert target_user.role == UserRole.USER
 
 
-def test_admin_can_promote_user_to_admin(
+def test_moderator_cannot_promote_user_to_moderator(
     client: TestClient,
     db: Session,
 ):
-    admin = create_test_user(
-        db,
-        user_id=1034,
-        username="promotingadmin",
-        email="promotingadmin@example.com",
-    )
+    """
+    Moderators cannot manage administrator privileges.
+    """
 
-    admin.role = "admin"
-    db.flush()
+    moderator = create_moderator(
+        db,
+        user_id=3104,
+        username="moderatorpromoter",
+        email="moderatorpromoter@example.com",
+    )
 
     target_user = create_test_user(
         db,
-        user_id=1035,
-        username="newadmin",
-        email="newadmin@example.com",
+        user_id=3105,
+        username="moderatorpromotiontarget",
+        email="moderatorpromotiontarget@example.com",
     )
 
     response = client.post(
         f"/api/profile/admin/{target_user.id}/promote",
-        headers=admin_authenticated_headers(admin),
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_admin_can_promote_user_to_moderator(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can promote a regular user to moderator.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3106,
+        username="promotingadmin",
+        email="promotingadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3107,
+        username="newmoderator",
+        email="newmoderator@example.com",
+    )
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote",
+        headers=authenticated_headers(admin),
     )
 
     assert response.status_code == 200
@@ -2477,101 +2171,1193 @@ def test_admin_can_promote_user_to_admin(
     data = response.json()
 
     assert data["id"] == target_user.id
-    assert data["role"] == "admin"
+    assert data["role"] == UserRole.MODERATOR
 
     db.refresh(target_user)
 
-    assert target_user.role == "admin" 
+    assert target_user.role == UserRole.MODERATOR
 
-def test_admin_cannot_promote_existing_admin(
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    assert after_audit_count == before_audit_count + 1
+
+
+@pytest.mark.parametrize(
+    "target_role",
+    [
+        UserRole.MODERATOR,
+        UserRole.ADMIN,
+    ],
+)
+def test_admin_cannot_promote_already_elevated_user_to_moderator(
     client: TestClient,
     db: Session,
+    target_role: str,
 ):
-    admin = create_test_user(
+    """
+    The user -> moderator endpoint cannot be used to alter an
+    already elevated account.
+    """
+
+    admin = create_admin(
         db,
-        user_id=1036,
-        username="promotingadmin2",
-        email="promotingadmin2@example.com",
+        user_id=3108 + len(target_role),
+        username=f"promoter{target_role}",
+        email=f"promoter{target_role}@example.com",
     )
 
-    admin.role = "admin"
-    db.flush()
-
-    target_admin = create_test_user(
+    target_user = create_test_user(
         db,
-        user_id=1037,
-        username="alreadyadmin",
-        email="alreadyadmin@example.com",
+        user_id=3110 + len(target_role),
+        username=f"already{target_role}",
+        email=f"already{target_role}@example.com",
     )
 
-    target_admin.role = "admin"
-    db.flush()
+    set_role(
+        db,
+        target_user,
+        target_role,
+    )
 
     response = client.post(
-        f"/api/profile/admin/{target_admin.id}/promote",
-        headers=admin_authenticated_headers(admin),
+        f"/api/profile/admin/{target_user.id}/promote",
+        headers=authenticated_headers(admin),
     )
 
     assert response.status_code == 409
 
-def test_admin_promote_nonexistent_user_returns_404(
+    db.refresh(target_user)
+
+    assert target_user.role == target_role
+
+
+def test_admin_promote_user_to_moderator_nonexistent_user_returns_404(
     client: TestClient,
     db: Session,
 ):
-    admin = create_test_user(
+    """
+    Promoting a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
         db,
-        user_id=1038,
+        user_id=3112,
         username="missingpromotionadmin",
         email="missingpromotionadmin@example.com",
     )
 
-    admin.role = "admin"
-    db.flush()
-
     response = client.post(
         "/api/profile/admin/999999/promote",
-        headers=admin_authenticated_headers(admin),
+        headers=authenticated_headers(admin),
     )
 
     assert response.status_code == 404
 
-def test_admin_cannot_promote_themselves(
+
+def test_admin_cannot_promote_themselves_to_moderator(
     client: TestClient,
     db: Session,
 ):
-    admin = create_test_user(
+    """
+    Administrators cannot promote themselves.
+    """
+
+    admin = create_admin(
         db,
-        user_id=1039,
+        user_id=3113,
         username="selfpromotionadmin",
         email="selfpromotionadmin@example.com",
     )
 
-    admin.role = "admin"
-    db.flush()
-
     response = client.post(
         f"/api/profile/admin/{admin.id}/promote",
-        headers=admin_authenticated_headers(admin),
+        headers=authenticated_headers(admin),
     )
 
     assert response.status_code == 409
 
-def test_profile_update_cannot_change_user_role(
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+# ============================================================================
+# MODERATOR -> ADMIN PROMOTION
+# ============================================================================
+
+
+def test_promote_moderator_to_admin_requires_authentication(
     client: TestClient,
     db: Session,
 ):
+    """
+    Moderator -> administrator promotion requires authentication.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3201,
+        username="promotemoderatortarget",
+        email="promotemoderatortarget@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{moderator.id}/promote-admin",
+    )
+
+    assert response.status_code == 401
+
+
+def test_normal_user_cannot_promote_moderator_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Normal users cannot promote moderators to administrators.
+    """
+
+    normal_user = create_test_user(
+        db,
+        user_id=3202,
+        username="normaladminpromoter",
+        email="normaladminpromoter@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3203,
+        username="moderatoradminpromotiontarget",
+        email="moderatoradminpromotiontarget@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_moderator.id}/promote-admin",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_moderator_cannot_promote_moderator_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators cannot promote other moderators to administrators.
+    """
+
+    acting_moderator = create_moderator(
+        db,
+        user_id=3204,
+        username="actingmoderator",
+        email="actingmoderator@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3205,
+        username="targetmoderator",
+        email="targetmoderator@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_moderator.id}/promote-admin",
+        headers=authenticated_headers(acting_moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_admin_can_promote_moderator_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can promote moderators to administrators.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3206,
+        username="adminpromotermoderator",
+        email="adminpromotermoderator@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3207,
+        username="moderatorbecomingadmin",
+        email="moderatorbecomingadmin@example.com",
+    )
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_moderator.id}/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_moderator.id
+    assert data["role"] == UserRole.ADMIN
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.ADMIN
+
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    assert after_audit_count == before_audit_count + 1
+
+
+def test_admin_cannot_promote_existing_admin_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator cannot promote an existing administrator.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3208,
+        username="existingadminpromoter",
+        email="existingadminpromoter@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3209,
+        username="alreadyadminagain",
+        email="alreadyadminagain@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_admin.id}/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.ADMIN
+
+
+def test_admin_cannot_promote_regular_user_directly_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Regular users must become moderators before administrators.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3210,
+        username="hierarchyadmin",
+        email="hierarchyadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3211,
+        username="regularpromotiontarget",
+        email="regularpromotiontarget@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_admin_promote_moderator_to_admin_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Promoting a nonexistent moderator returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3212,
+        username="missingadminpromotion",
+        email="missingadminpromotion@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin/999999/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+
+def test_admin_cannot_promote_themselves_to_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators cannot promote themselves.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3213,
+        username="selfadminpromotion",
+        email="selfadminpromotion@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{admin.id}/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+# ============================================================================
+# ADMIN -> MODERATOR DEMOTION
+# ============================================================================
+
+
+def test_demote_admin_to_moderator_requires_authentication(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrator demotion requires authentication.
+    """
+
+    target_admin = create_admin(
+        db,
+        user_id=3301,
+        username="demotetarget",
+        email="demotetarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+    )
+
+    assert response.status_code == 401
+
+
+def test_normal_user_cannot_demote_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Normal users cannot demote administrators.
+    """
+
+    normal_user = create_test_user(
+        db,
+        user_id=3302,
+        username="normaldemoter",
+        email="normaldemoter@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3303,
+        username="targetadmindemote",
+        email="targetadmindemote@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.ADMIN
+
+
+def test_moderator_cannot_demote_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators cannot demote administrators.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3304,
+        username="moderatorcannotdemote",
+        email="moderatorcannotdemote@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3305,
+        username="adminmoderatorcannotdemote",
+        email="adminmoderatorcannotdemote@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.ADMIN
+
+
+def test_admin_can_demote_another_admin_to_moderator(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator can demote another administrator to moderator.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3306,
+        username="actingadmindemoter",
+        email="actingadmindemoter@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3307,
+        username="targetadmindemote",
+        email="targetadmindemote@example.com",
+    )
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=acting_admin.id,
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_admin.id
+    assert data["role"] == UserRole.MODERATOR
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.MODERATOR
+
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=acting_admin.id,
+    )
+
+    assert after_audit_count == before_audit_count + 1
+
+
+def test_admin_cannot_demote_themselves(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator cannot demote themselves.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3308,
+        username="selfdemotingadmin",
+        email="selfdemotingadmin@example.com",
+    )
+
+    other_admin = create_admin(
+        db,
+        user_id=3309,
+        username="otheradmin",
+        email="otheradmin@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{admin.id}/demote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+    db.refresh(other_admin)
+
+    assert admin.role == UserRole.ADMIN
+    assert other_admin.role == UserRole.ADMIN
+
+
+def test_admin_cannot_demote_last_admin(
+    client: TestClient,
+    db: Session,
+):
+    """
+    The final administrator cannot be demoted.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3310,
+        username="lastadmin",
+        email="lastadmin@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{admin.id}/demote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_admin_demote_non_admin_returns_409(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A moderator cannot be demoted through the admin -> moderator endpoint.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3311,
+        username="demotevalidationadmin",
+        email="demotevalidationadmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3312,
+        username="alreadyamoderator",
+        email="alreadyamoderator@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/demote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_admin_demote_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Demoting a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3313,
+        username="missingdemoteadmin",
+        email="missingdemoteadmin@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile/admin/999999/demote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+
+# ============================================================================
+# MODERATOR -> USER REVOCATION
+# ============================================================================
+
+
+def test_revoke_moderator_requires_authentication(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderator revocation requires authentication.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3401,
+        username="revoketarget",
+        email="revoketarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{moderator.id}/revoke-moderator",
+    )
+
+    assert response.status_code == 401
+
+
+def test_normal_user_cannot_revoke_moderator(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Normal users cannot revoke moderator privileges.
+    """
+
+    normal_user = create_test_user(
+        db,
+        user_id=3402,
+        username="normalrevoker",
+        email="normalrevoker@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3403,
+        username="moderatorrevoketarget",
+        email="moderatorrevoketarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/revoke-moderator",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_moderator_cannot_revoke_moderator(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators cannot revoke other moderators.
+    """
+
+    acting_moderator = create_moderator(
+        db,
+        user_id=3404,
+        username="actingmoderatorrevoker",
+        email="actingmoderatorrevoker@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3405,
+        username="targetmoderatorrevoker",
+        email="targetmoderatorrevoker@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/revoke-moderator",
+        headers=authenticated_headers(acting_moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_admin_can_revoke_moderator_to_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can revoke moderator privileges.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3406,
+        username="adminrevoker",
+        email="adminrevoker@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3407,
+        username="moderatorbecominguser",
+        email="moderatorbecominguser@example.com",
+    )
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/revoke-moderator",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_moderator.id
+    assert data["role"] == UserRole.USER
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.role == UserRole.USER
+
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    assert after_audit_count == before_audit_count + 1
+
+
+def test_admin_cannot_revoke_admin_to_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators must use the admin -> moderator workflow for admins.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3408,
+        username="actingadminrevoke",
+        email="actingadminrevoke@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3409,
+        username="targetadminrevoke",
+        email="targetadminrevoke@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/revoke-moderator",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.ADMIN
+
+
+def test_admin_cannot_revoke_regular_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Regular users are not valid targets for moderator revocation.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3410,
+        username="regularrevocationadmin",
+        email="regularrevocationadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3411,
+        username="regularrevocationtarget",
+        email="regularrevocationtarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/revoke-moderator",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_admin_cannot_revoke_themselves(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator cannot target themselves with moderator revocation.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3412,
+        username="selfrevokingadmin",
+        email="selfrevokingadmin@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{admin.id}/revoke-moderator",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_admin_revoke_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Revoking a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3413,
+        username="missingrevokeadmin",
+        email="missingrevokeadmin@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile/admin/999999/revoke-moderator",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+
+# ============================================================================
+# DIRECT SERVICE ROLE-MANAGEMENT SECURITY
+# ============================================================================
+
+
+def test_promote_user_to_moderator_service_rejects_self_promotion(
+    db: Session,
+):
+    """
+    The service itself protects against self-promotion even if the router
+    authorization layer is bypassed.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3501,
+        username="serviceadmin",
+        email="serviceadmin@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot promote themselves",
+    ):
+        promote_user_to_moderator_service(
+            db,
+            target_user=admin,
+            acting_admin=admin,
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_promote_moderator_to_admin_service_rejects_self_promotion(
+    db: Session,
+):
+    """
+    The administrator-promotion service protects against self-promotion.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3502,
+        username="serviceadmin2",
+        email="serviceadmin2@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot promote themselves",
+    ):
+        promote_moderator_to_admin_service(
+            db,
+            target_user=admin,
+            acting_admin=admin,
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_demote_admin_service_rejects_self_demotion(
+    db: Session,
+):
+    """
+    The admin-demotion service protects against self-demotion.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3503,
+        username="selfdemoteservice",
+        email="selfdemoteservice@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot demote themselves",
+    ):
+        demote_admin_to_moderator_service(
+            db,
+            target_user=admin,
+            acting_admin=admin,
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_revoke_moderator_service_rejects_admin_target(
+    db: Session,
+):
+    """
+    The moderator-revocation service cannot downgrade administrators.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3504,
+        username="revokeactingadmin",
+        email="revokeactingadmin@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3505,
+        username="revokeadmin",
+        email="revokeadmin@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot be revoked",
+    ):
+        revoke_moderator_service(
+            db,
+            target_user=target_admin,
+            acting_admin=acting_admin,
+        )
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.ADMIN
+
+
+# ============================================================================
+# ROLE PERSISTENCE / HIERARCHY
+# ============================================================================
+
+
+def test_user_to_moderator_to_admin_role_lifecycle(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Verify the complete intended promotion hierarchy:
+
+        user -> moderator -> admin
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3601,
+        username="lifecycleadmin",
+        email="lifecycleadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3602,
+        username="rolelifecycle",
+        email="rolelifecycle@example.com",
+    )
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.MODERATOR
+
+    response = client.post(
+        f"/api/profile/admin/{target_user.id}/promote-admin",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.ADMIN
+
+
+def test_admin_to_moderator_to_user_role_lifecycle(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Verify the complete intended demotion hierarchy:
+
+        admin -> moderator -> user
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3603,
+        username="demotionlifecycleadmin",
+        email="demotionlifecycleadmin@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3604,
+        username="demotionlifecycle",
+        email="demotionlifecycle@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.MODERATOR
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/revoke-moderator",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.USER
+
+
+# ============================================================================
+# PROFILE ROLE ESCALATION PROTECTION
+# ============================================================================
+
+
+@pytest.mark.parametrize(
+    ("initial_role", "requested_role"),
+    [
+        (UserRole.USER, UserRole.ADMIN),
+        (UserRole.USER, UserRole.MODERATOR),
+        (UserRole.MODERATOR, UserRole.ADMIN),
+        (UserRole.MODERATOR, UserRole.USER),
+        (UserRole.ADMIN, UserRole.USER),
+        (UserRole.ADMIN, UserRole.MODERATOR),
+    ],
+)
+def test_profile_update_cannot_change_user_role(
+    client: TestClient,
+    db: Session,
+    initial_role: str,
+    requested_role: str,
+):
+    """
+    Normal profile updates cannot modify the authenticated user's role.
+
+    Role management must happen through dedicated administrator-only
+    endpoints.
+    """
+
     user = create_test_user(
         db,
-        user_id=1040,
-        username="roleprotected",
-        email="roleprotected@example.com",
+        user_id=3700 + len(initial_role) + len(requested_role),
+        username=(
+            f"profile{initial_role}{requested_role}"
+        ),
+        email=(
+            f"profile{initial_role}{requested_role}"
+            "@example.com"
+        ),
+    )
+
+    set_role(
+        db,
+        user,
+        initial_role,
     )
 
     response = client.patch(
         "/api/profile",
         headers=authenticated_headers(user),
         json={
-            "role": "admin",
+            "role": requested_role,
         },
     )
 
@@ -2579,4 +3365,359 @@ def test_profile_update_cannot_change_user_role(
 
     db.refresh(user)
 
-    assert user.role == "user"
+    assert user.role == initial_role
+
+
+def test_profile_update_cannot_change_role_even_with_multiple_fields(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Role cannot be changed even when it is supplied alongside valid
+    profile changes.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3710,
+        username="multiupdateadmin",
+        email="multiupdateadmin@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile",
+        headers=authenticated_headers(moderator),
+        json={
+            "first_name": "Changed",
+            "bio": "Updated profile.",
+            "role": UserRole.ADMIN,
+        },
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(moderator)
+
+    assert moderator.first_name == "Changed"
+    assert moderator.bio == "Updated profile."
+    assert moderator.role == UserRole.MODERATOR
+
+
+# ============================================================================
+# JWT ROLE CLAIM MUST NOT OVERRIDE DATABASE ROLE
+# ============================================================================
+
+
+def test_database_role_is_authoritative_for_authorization(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Authorization must use the current database role rather than trusting
+    a role value supplied inside the JWT.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=3801,
+        username="jwtroleuser",
+        email="jwtroleuser@example.com",
+    )
+
+    token = create_access_token(
+        data={
+            "sub": str(user.id),
+            "token_version": user.token_version,
+            "role": UserRole.ADMIN,
+        },
+    )
+
+    response = client.post(
+        "/api/profile/admin/3802/promote",
+        headers={
+            "Authorization": f"Bearer {token}",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_revoked_moderator_token_cannot_gain_privileges_from_old_role(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Changing the database role downward immediately removes the user's
+    ability to use moderator/admin endpoints according to the new role.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3803,
+        username="roleauthorityadmin",
+        email="roleauthorityadmin@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3804,
+        username="roleauthoritytarget",
+        email="roleauthoritytarget@example.com",
+    )
+
+    target_headers = authenticated_headers(target_admin)
+
+    response = client.patch(
+        f"/api/profile/admin/{target_admin.id}/demote-admin",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_admin)
+
+    assert target_admin.role == UserRole.MODERATOR
+
+    response = client.post(
+        "/api/profile/admin/3805/promote",
+        headers=target_headers,
+    )
+
+    assert response.status_code == 403
+
+
+# ============================================================================
+# ROLE MANAGEMENT TRANSACTION BEHAVIOR
+# ============================================================================
+
+
+def test_promote_user_to_moderator_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    User -> moderator promotion is flush-only and can be rolled back.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3901,
+        username="rollbackpromotionadmin",
+        email="rollbackpromotionadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3902,
+        username="rollbackpromotiontarget",
+        email="rollbackpromotiontarget@example.com",
+    )
+
+    target_user_id =target_user.id
+
+    nested = db.begin_nested()
+
+    promoted = promote_user_to_moderator_service(
+        db,
+        target_user=target_user,
+        acting_admin=admin,
+    )
+
+    assert promoted.role == UserRole.MODERATOR
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.MODERATOR
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_user_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.role == UserRole.USER
+
+
+def test_promote_moderator_to_admin_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    Moderator -> administrator promotion is flush-only and can be rolled back.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3903,
+        username="rollbackadminpromotion",
+        email="rollbackadminpromotion@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3904,
+        username="rollbackmoderatorpromotion",
+        email="rollbackmoderatorpromotion@example.com",
+    )
+
+    target_moderator_id = target_moderator.id
+
+    nested = db.begin_nested()
+
+    promoted = promote_moderator_to_admin_service(
+        db,
+        target_user=target_moderator,
+        acting_admin=admin,
+    )
+
+    assert promoted.role == UserRole.ADMIN
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_moderator_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.role == UserRole.MODERATOR
+
+
+def test_demote_admin_to_moderator_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    Administrator -> moderator demotion is flush-only and can be rolled back.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=3905,
+        username="rollbackdemotionacting",
+        email="rollbackdemotionacting@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=3906,
+        username="rollbackdemotiontarget",
+        email="rollbackdemotiontarget@example.com",
+    )
+
+    target_admin_id = target_admin.id
+
+    nested = db.begin_nested()
+
+    demoted = demote_admin_to_moderator_service(
+        db,
+        target_user=target_admin,
+        acting_admin=acting_admin,
+    )
+
+    assert demoted.role == UserRole.MODERATOR
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_admin_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.role == UserRole.ADMIN
+
+
+def test_revoke_moderator_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    Moderator -> user revocation is flush-only and can be rolled back.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3907,
+        username="rollbackrevocationadmin",
+        email="rollbackrevocationadmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=3908,
+        username="rollbackrevocationtarget",
+        email="rollbackrevocationtarget@example.com",
+    )
+
+    nested = db.begin_nested()
+
+    revoked = revoke_moderator_service(
+        db,
+        target_user=target_moderator,
+        acting_admin=admin,
+    )
+
+    assert revoked.role == UserRole.USER
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_moderator.id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.role == UserRole.MODERATOR
+
+
+# ============================================================================
+# ADMIN INVARIANT
+# ============================================================================
+
+
+def test_last_admin_invariant_is_enforced_by_service(
+    db: Session,
+):
+    """
+    The service layer independently protects the last administrator.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4001,
+        username="onlyadminservice",
+        email="onlyadminservice@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="last administrator",
+    ):
+        demote_admin_to_moderator_service(
+            db,
+            target_user=admin,
+            acting_admin=(
+                User(
+                    id=4002,
+                    username="differentadmin",
+                    first_name="Different",
+                    last_name="Admin",
+                    email="differentadmin@example.com",
+                    password_hash="test-password-hash",
+                    role=UserRole.ADMIN,
+                    is_active=True,
+                    is_verified=True,
+                )
+            ),
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN

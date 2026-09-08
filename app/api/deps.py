@@ -6,6 +6,7 @@ Contains reusable FastAPI dependencies for:
 - authenticated users
 - verified users
 - role-based authorization
+- moderator authorization
 - administrator authorization
 
 Database sessions are provided by:
@@ -19,6 +20,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from jose import JWTError
 from sqlalchemy.orm import Session
 
+from app.core.constants import UserRole
 from app.core.security import decode_access_token
 from app.db.dependencies import get_db
 from app.models.user import User
@@ -65,10 +67,6 @@ def get_current_user(
         },
     )
 
-    # -------------------------------------------------------------------------
-    # Authorization header
-    # -------------------------------------------------------------------------
-
     if credentials is None:
         raise unauthorized
 
@@ -80,18 +78,10 @@ def get_current_user(
     if not token:
         raise unauthorized
 
-    # -------------------------------------------------------------------------
-    # Decode JWT
-    # -------------------------------------------------------------------------
-
     try:
         payload = decode_access_token(token)
     except JWTError:
         raise unauthorized from None
-
-    # -------------------------------------------------------------------------
-    # Extract user ID
-    # -------------------------------------------------------------------------
 
     subject = payload.get("sub")
 
@@ -103,10 +93,6 @@ def get_current_user(
     except (TypeError, ValueError):
         raise unauthorized from None
 
-    # -------------------------------------------------------------------------
-    # Load user
-    # -------------------------------------------------------------------------
-
     user = get_user_by_id(
         db,
         user_id,
@@ -115,19 +101,8 @@ def get_current_user(
     if user is None:
         raise unauthorized
 
-    # -------------------------------------------------------------------------
-    # Active account check
-    # -------------------------------------------------------------------------
-
     if not user.is_active:
         raise unauthorized
-
-    # -------------------------------------------------------------------------
-    # Token version check
-    #
-    # This allows password changes, password resets, or security events
-    # to invalidate previously issued JWT access tokens.
-    # -------------------------------------------------------------------------
 
     token_version = payload.get("token_version")
 
@@ -172,7 +147,7 @@ def require_role(
     Example:
 
         current_user: User = Depends(
-            require_role("admin")
+            require_role(UserRole.ADMIN)
         )
     """
 
@@ -204,16 +179,46 @@ def require_role(
 
 
 # =============================================================================
+# MODERATOR
+# =============================================================================
+
+def get_current_moderator(
+    current_user: User = Depends(
+        require_role(
+            UserRole.MODERATOR,
+            UserRole.ADMIN,
+        )
+    ),
+) -> User:
+    """
+    Return the authenticated user only if they have moderator-level
+    privileges.
+
+    Both moderators and administrators are allowed.
+
+    Authorization hierarchy:
+
+        user < moderator < admin
+    """
+
+    return current_user
+
+
+# =============================================================================
 # ADMINISTRATOR
 # =============================================================================
 
 def get_current_admin(
     current_user: User = Depends(
-        require_role("admin")
+        require_role(UserRole.ADMIN)
     ),
 ) -> User:
     """
     Return the authenticated TRACKIT administrator.
+
+    Only administrators are allowed.
+
+    Moderators do not satisfy administrator authorization.
     """
 
     return current_user

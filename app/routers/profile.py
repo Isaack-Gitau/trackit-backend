@@ -2,8 +2,8 @@
 TRACKIT Profile Router.
 
 Provides authenticated-user profile endpoints,
-account management, and authorized administrative
-user inspection.
+account management, user administration, and
+administrative role management.
 
 Endpoints:
 
@@ -12,6 +12,10 @@ Endpoints:
     DELETE /api/profile/account
 
     GET    /api/profile/admin/{user_id}
+    POST   /api/profile/admin/{user_id}/promote
+    POST   /api/profile/admin/{user_id}/promote-admin
+    PATCH  /api/profile/admin/{user_id}/demote-admin
+    PATCH  /api/profile/admin/{user_id}/revoke-moderator
 
 Users may:
 - View their own profile.
@@ -27,8 +31,15 @@ Users may:
 - Update their preferences.
 - Permanently delete their own account.
 
+Moderators may:
+- View detailed profiles of users for moderation/operations.
+
 Administrators may:
 - View any user's detailed account/profile information.
+- Promote regular users to moderators.
+- Promote moderators to administrators.
+- Demote administrators to moderators.
+- Revoke moderator privileges.
 
 Administrative responses deliberately exclude
 authentication and security secrets.
@@ -46,6 +57,7 @@ from sqlalchemy.orm import Session
 
 from app.api.deps import (
     get_current_admin,
+    get_current_moderator,
     get_current_user,
 )
 from app.db.dependencies import get_db
@@ -55,19 +67,20 @@ from app.schemas.profile import (
     ProfileResponse,
     ProfileUpdate,
 )
-from app.services.user import (
-    delete_user_account_service,
-    get_user,
-    update_user_profile_service,
-    verify_user_password,
-    promote_user_to_admin_service,
-)
-
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
 )
-
+from app.services.user import (
+    delete_user_account_service,
+    demote_admin_to_moderator_service,
+    get_user,
+    promote_moderator_to_admin_service,
+    promote_user_to_moderator_service,
+    revoke_moderator_service,
+    update_user_profile_service,
+    verify_user_password,
+)
 from app.utils.images import delete_stored_image
 
 
@@ -159,27 +172,14 @@ def update_profile(
 
     Email changes also invalidate existing authentication
     sessions through the user service.
+
+    Role changes are not accepted.
     """
 
     # -------------------------------------------------------------------------
     # Determine exactly which fields were supplied.
     #
     # exclude_unset=True is essential for PATCH semantics.
-    #
-    # Example:
-    #
-    #     {}
-    #
-    # means "change nothing".
-    #
-    # Whereas:
-    #
-    #     {"bio": None}
-    #
-    # means "explicitly clear the bio".
-    #
-    # We must preserve that distinction when passing the changes
-    # to the service layer.
     # -------------------------------------------------------------------------
 
     changes = profile_data.model_dump(
@@ -197,17 +197,6 @@ def update_profile(
 
     # -------------------------------------------------------------------------
     # Update profile
-    #
-    # Pass the complete changes mapping to the service rather than
-    # expanding it into keyword arguments.
-    #
-    # This allows the service/repository to distinguish:
-    #
-    #     field omitted
-    #
-    # from:
-    #
-    #     field explicitly supplied as None
     # -------------------------------------------------------------------------
 
     try:
@@ -225,9 +214,6 @@ def update_profile(
 
     # -------------------------------------------------------------------------
     # Protect against database-level uniqueness races.
-    #
-    # The service performs the normal uniqueness check, but the
-    # database unique indexes remain the final protection.
     # -------------------------------------------------------------------------
 
     except IntegrityError:
@@ -304,10 +290,6 @@ def delete_account(
 
     # -------------------------------------------------------------------------
     # Verify current password.
-    #
-    # We deliberately use the same password verification service
-    # used elsewhere in the application so password verification
-    # remains centralized.
     # -------------------------------------------------------------------------
 
     if not verify_user_password(
@@ -322,8 +304,6 @@ def delete_account(
     # -------------------------------------------------------------------------
     # Collect media and delete the account inside the current
     # database transaction.
-    #
-    # The service flushes the deletion but does NOT commit.
     # -------------------------------------------------------------------------
 
     try:
@@ -337,9 +317,6 @@ def delete_account(
         #
         # This endpoint needs deterministic knowledge that the database
         # deletion succeeded before physical media files are removed.
-        #
-        # A second commit from get_db() after the endpoint returns is
-        # harmless because the transaction is already complete.
         # ---------------------------------------------------------------------
 
         db.commit()
@@ -351,8 +328,6 @@ def delete_account(
     # -------------------------------------------------------------------------
     # Remove physical media only after the database deletion has
     # successfully committed.
-    #
-    # Filesystem cleanup failure must NOT resurrect the deleted account.
     # -------------------------------------------------------------------------
 
     for storage_key in media_storage_keys:
@@ -374,7 +349,7 @@ def delete_account(
 
 
 # ============================================================================
-# ADMIN: GET USER DETAIL
+# MODERATOR + ADMIN: GET USER DETAIL
 # ============================================================================
 
 
@@ -382,22 +357,22 @@ def delete_account(
     "/admin/{user_id}",
     response_model=AdminUserDetailResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get detailed user profile as administrator",
+    summary="Get detailed user profile for moderation",
 )
 def get_admin_user_profile(
     user_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ) -> AdminUserDetailResponse:
     """
     Return detailed profile and account information for any user.
 
-    Access is restricted to administrators.
+    Access is restricted to moderators and administrators.
 
-    The authenticated administrator is identified by the JWT.
+    Administrators inherit moderator-level privileges.
 
-    The target user ID is used only to identify which user
-    the administrator wants to inspect.
+    The authenticated moderator/administrator is identified
+    by the JWT.
 
     Security-sensitive authentication fields are deliberately
     excluded by AdminUserDetailResponse.
@@ -430,21 +405,34 @@ def get_admin_user_profile(
         user
     )
 
+
+# ============================================================================
+# ADMIN ONLY: PROMOTE USER → MODERATOR
+# ============================================================================
+
+
 @router.post(
     "/admin/{user_id}/promote",
     response_model=AdminUserDetailResponse,
     status_code=status.HTTP_200_OK,
-    summary="Promote a user to administrator",
+    summary="Promote a user to moderator",
 )
-def promote_user_to_admin(
+def promote_user_to_moderator(
     user_id: int,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_admin),
 ) -> AdminUserDetailResponse:
     """
-    Promote an existing user account to administrator.
+    Promote a regular user account to moderator.
 
     Only authenticated administrators may perform this action.
+
+    This endpoint deliberately promotes only:
+
+        user → moderator
+
+    Promotion from moderator → admin uses the separate
+    administrator promotion endpoint.
     """
 
     target_user = get_user(
@@ -459,7 +447,7 @@ def promote_user_to_admin(
         )
 
     try:
-        promoted_user = promote_user_to_admin_service(
+        promoted_user = promote_user_to_moderator_service(
             db,
             target_user=target_user,
             acting_admin=current_admin,
@@ -472,7 +460,7 @@ def promote_user_to_admin(
             description=(
                 f"Administrator {current_admin.id} "
                 f"promoted user {target_user.id} "
-                "to administrator."
+                "from user to moderator."
             ),
             user_id=current_admin.id,
         )
@@ -482,11 +470,216 @@ def promote_user_to_admin(
         )
 
     except ValueError as exc:
-
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
 
 
+# ============================================================================
+# ADMIN ONLY: PROMOTE MODERATOR → ADMIN
+# ============================================================================
 
+
+@router.post(
+    "/admin/{user_id}/promote-admin",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Promote a moderator to administrator",
+)
+def promote_moderator_to_admin(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Promote an existing moderator account to administrator.
+
+    Only authenticated administrators may perform this action.
+
+    This endpoint deliberately promotes only:
+
+        moderator → admin
+
+    Regular users must first be promoted to moderator.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        promoted_user = promote_moderator_to_admin_service(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"promoted moderator {target_user.id} "
+                "from moderator to administrator."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            promoted_user
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# ADMIN ONLY: DEMOTE ADMIN → MODERATOR
+# ============================================================================
+
+
+@router.patch(
+    "/admin/{user_id}/demote-admin",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Demote an administrator to moderator",
+)
+def demote_admin_to_moderator(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Demote an administrator account to moderator.
+
+    Only authenticated administrators may perform this action.
+
+    Security rules:
+
+    - Administrators cannot demote themselves.
+    - The last remaining administrator cannot be demoted.
+    - Only an administrator can be targeted by this endpoint.
+
+    Successful demotions are recorded in the audit log.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        demoted_user = demote_admin_to_moderator_service(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"demoted administrator {target_user.id} "
+                "from administrator to moderator."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            demoted_user
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# ADMIN ONLY: REVOKE MODERATOR → USER
+# ============================================================================
+
+
+@router.patch(
+    "/admin/{user_id}/revoke-moderator",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Revoke moderator privileges",
+)
+def revoke_moderator(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Revoke moderator privileges from a moderator account.
+
+    The target account is returned to the regular user role.
+
+    Only authenticated administrators may perform this action.
+
+    Administrators cannot be directly revoked through this endpoint.
+
+    Successful revocations are recorded in the audit log.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        revoked_user = revoke_moderator_service(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"revoked moderator {target_user.id} "
+                "from moderator to user."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            revoked_user
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc

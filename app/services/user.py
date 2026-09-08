@@ -11,6 +11,10 @@ Responsibilities:
 - Activate/deactivate accounts
 - Verify email accounts
 - Change passwords
+- Promote users to moderator
+- Promote moderators to administrator
+- Demote administrators to moderator
+- Revoke moderator privileges
 - Invalidate authentication sessions
 
 This module does NOT handle HTTP requests.
@@ -28,11 +32,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy.orm import Session
 
+from app.core.constants import UserRole
 from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.repositories.users import (
+    count_users_by_role,
     create_user,
     delete_user,
+    demote_admin_to_moderator,
     get_user_by_email,
     get_user_by_email_excluding_id,
     get_user_by_id,
@@ -40,14 +47,17 @@ from app.repositories.users import (
     get_user_by_username,
     get_user_by_username_excluding_id,
     get_user_media_storage_keys,
+    promote_moderator_to_admin,
+    promote_user_to_moderator,
+    revoke_moderator,
     update_user_profile,
-    promote_user_to_admin,
 )
 
 
 # ============================================================================
 # PROFILE UPDATE FIELDS
 # ============================================================================
+
 
 PROFILE_UPDATE_FIELDS = {
     "username",
@@ -156,6 +166,10 @@ def create_user_account(
 ) -> User:
     """
     Create a new TRACKIT user account.
+
+    New accounts are always created with the regular user role.
+    Elevated roles must only be assigned through the protected
+    administrator-management workflow.
 
     Passwords are hashed before persistence.
     """
@@ -273,6 +287,7 @@ def update_user_profile_service(
     - Changing the email address increments token_version and
       therefore invalidates existing authentication sessions.
     - Other profile changes do not invalidate authentication sessions.
+    - The role field is never accepted as a profile update.
 
     The transaction is flushed but NOT committed.
 
@@ -605,34 +620,37 @@ def deactivate_user(
 
     return user
 
+
 # ============================================================================
 # ADMINISTRATION
 # ============================================================================
 
 
-def promote_user_to_admin_service(
+def promote_user_to_moderator_service(
     db: Session,
     *,
     target_user: User,
     acting_admin: User,
 ) -> User:
     """
-    Promote a user account to administrator.
+    Promote a regular user account to moderator.
 
     Security rules:
 
     - Only callers already authorized as administrators may invoke
       this service through the API layer.
     - An administrator cannot promote themselves.
-    - An account that is already an administrator cannot be promoted
-      again.
+    - A user who is already a moderator cannot be promoted again.
+    - An administrator cannot be promoted to moderator.
+    - Only a regular user account may enter the moderator role.
     - The operation is flushed but not committed.
     - The caller controls transaction commit/rollback.
 
     Raises:
         ValueError:
             If the acting administrator attempts to promote themselves,
-            or if the target is already an administrator.
+            if the target already has an elevated role, or if the target
+            has an unexpected role.
     """
 
     if target_user.id == acting_admin.id:
@@ -640,12 +658,203 @@ def promote_user_to_admin_service(
             "An administrator cannot promote themselves."
         )
 
-    if (target_user.role or "").strip().lower() == "admin":
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role == UserRole.MODERATOR:
+        raise ValueError(
+            "User is already a moderator."
+        )
+
+    if target_role == UserRole.ADMIN:
         raise ValueError(
             "User is already an administrator."
         )
 
-    return promote_user_to_admin(
+    if target_role != UserRole.USER:
+        raise ValueError(
+            "Only regular users can be promoted to moderator."
+        )
+
+    return promote_user_to_moderator(
+        db,
+        target_user,
+    )
+
+
+# -----------------------------------------------------------------------------
+
+
+def promote_moderator_to_admin_service(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+) -> User:
+    """
+    Promote an existing moderator account to administrator.
+
+    Security rules:
+
+    - Only callers already authorized as administrators may invoke
+      this service through the API layer.
+    - An administrator cannot promote themselves.
+    - An account that is already an administrator cannot be promoted again.
+    - Only an existing moderator may be promoted to administrator.
+    - The operation is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Raises:
+        ValueError:
+            If the acting administrator attempts to promote themselves,
+            if the target is already an administrator, or if the target
+            is not currently a moderator.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot promote themselves."
+        )
+
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role == UserRole.ADMIN:
+        raise ValueError(
+            "User is already an administrator."
+        )
+
+    if target_role != UserRole.MODERATOR:
+        raise ValueError(
+            "Only moderators can be promoted to administrator."
+        )
+
+    return promote_moderator_to_admin(
+        db,
+        target_user,
+    )
+
+
+# -----------------------------------------------------------------------------
+
+
+def demote_admin_to_moderator_service(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+) -> User:
+    """
+    Demote an administrator account to moderator.
+
+    Security rules:
+
+    - Only callers already authorized as administrators may invoke
+      this service through the API layer.
+    - An administrator cannot demote themselves.
+    - The final remaining administrator cannot be demoted.
+    - Only an existing administrator may be demoted through this workflow.
+    - The operation is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Raises:
+        ValueError:
+            If the acting administrator attempts to demote themselves,
+            if the target is not an administrator, or if the target is
+            the last remaining administrator.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot demote themselves."
+        )
+
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role != UserRole.ADMIN:
+        raise ValueError(
+            "User is not an administrator."
+        )
+
+    admin_count = count_users_by_role(
+        db,
+        UserRole.ADMIN,
+    )
+
+    if admin_count <= 1:
+        raise ValueError(
+            "The last administrator cannot be demoted."
+        )
+
+    return demote_admin_to_moderator(
+        db,
+        target_user,
+    )
+
+
+# -----------------------------------------------------------------------------
+
+
+def revoke_moderator_service(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+) -> User:
+    """
+    Revoke moderator privileges from an existing moderator.
+
+    The moderator is returned to the regular user role.
+
+    Security rules:
+
+    - Only callers already authorized as administrators may invoke
+      this service through the API layer.
+    - An administrator cannot demote themselves.
+    - Administrators cannot be directly revoked to regular users.
+    - Only an existing moderator may be revoked through this workflow.
+    - The operation is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Raises:
+        ValueError:
+            If the acting administrator targets themselves,
+            if the target is an administrator, or if the target
+            is not currently a moderator.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot demote themselves."
+        )
+
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role == UserRole.ADMIN:
+        raise ValueError(
+            "Administrators cannot be revoked to regular users."
+        )
+
+    if target_role != UserRole.MODERATOR:
+        raise ValueError(
+            "User is not a moderator."
+        )
+
+    return revoke_moderator(
         db,
         target_user,
     )
