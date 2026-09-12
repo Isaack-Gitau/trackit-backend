@@ -145,3 +145,8 @@ async def run_suspension_expiration_task(
     await send_reactivation_emails(reactivated)
 
     return reactivated
+
+if __name__ == "__main__":
+    import asyncio
+
+    asyncio.run(run_suspension_expiration_task())
