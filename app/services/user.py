@@ -9,6 +9,7 @@ Responsibilities:
 - Update profile information
 - Delete user accounts
 - Activate/deactivate accounts
+- Temporarily suspend accounts
 - Verify email accounts
 - Change passwords
 - Promote users to moderator
@@ -28,7 +29,7 @@ Transaction policy:
 """
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
 
@@ -36,10 +37,12 @@ from app.core.constants import UserRole
 from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.repositories.users import (
+    count_active_users_by_role,
     count_users_by_role,
     create_user,
     delete_user,
     demote_admin_to_moderator,
+    get_expired_suspended_users,
     get_user_by_email,
     get_user_by_email_excluding_id,
     get_user_by_id,
@@ -52,6 +55,7 @@ from app.repositories.users import (
     revoke_moderator,
     update_user_profile,
 )
+from app.services.tokens import invalidate_all_user_tokens
 
 
 # ============================================================================
@@ -87,6 +91,15 @@ PROFILE_NULLABLE_FIELDS = {
     "bio",
     "address",
 }
+
+
+# ============================================================================
+# ACCOUNT SUSPENSION
+# ============================================================================
+
+
+MIN_SUSPENSION_HOURS = 1
+MAX_SUSPENSION_HOURS = 24 * 90
 
 
 # ============================================================================
@@ -295,10 +308,6 @@ def update_user_profile_service(
     and rollback behavior.
     """
 
-    # ========================================================================
-    # COPY AND VALIDATE SUPPLIED FIELDS
-    # ========================================================================
-
     changes = dict(changes)
 
     unknown_fields = set(changes) - PROFILE_UPDATE_FIELDS
@@ -308,10 +317,6 @@ def update_user_profile_service(
             "Unsupported profile fields: "
             + ", ".join(sorted(unknown_fields))
         )
-
-    # ========================================================================
-    # VALIDATE NULL VALUES
-    # ========================================================================
 
     for field in PROFILE_REQUIRED_FIELDS:
         if field in changes and changes[field] is None:
@@ -325,10 +330,6 @@ def update_user_profile_service(
                 raise ValueError(
                     f"{field} must be a string or null."
                 )
-
-    # ========================================================================
-    # NORMALIZE USERNAME
-    # ========================================================================
 
     normalized_username: str | None = None
 
@@ -349,10 +350,6 @@ def update_user_profile_service(
 
         changes["username"] = normalized_username
 
-    # ========================================================================
-    # NORMALIZE EMAIL
-    # ========================================================================
-
     normalized_email: str | None = None
 
     if "email" in changes:
@@ -371,10 +368,6 @@ def update_user_profile_service(
             )
 
         changes["email"] = normalized_email
-
-    # ========================================================================
-    # NORMALIZE REQUIRED NAME FIELDS
-    # ========================================================================
 
     if "first_name" in changes:
         first_name = changes["first_name"]
@@ -410,13 +403,6 @@ def update_user_profile_service(
 
         changes["last_name"] = last_name
 
-    # ========================================================================
-    # NORMALIZE NULLABLE STRING FIELDS
-    #
-    # None means "clear this field".
-    # A non-None value is stored after trimming whitespace.
-    # ========================================================================
-
     for field in PROFILE_NULLABLE_FIELDS:
         if field not in changes:
             continue
@@ -438,10 +424,6 @@ def update_user_profile_service(
         else:
             changes[field] = value
 
-    # ========================================================================
-    # VALIDATE JSON PROFILE FIELDS
-    # ========================================================================
-
     for field in (
         "social_links",
         "preferences",
@@ -461,10 +443,6 @@ def update_user_profile_service(
                 f"{field} must be an object."
             )
 
-    # ========================================================================
-    # USERNAME UNIQUENESS
-    # ========================================================================
-
     if normalized_username is not None:
         existing_username_user = (
             get_user_by_username_excluding_id(
@@ -478,10 +456,6 @@ def update_user_profile_service(
             raise ValueError(
                 "Username is already registered."
             )
-
-    # ========================================================================
-    # EMAIL UNIQUENESS
-    # ========================================================================
 
     if normalized_email is not None:
         existing_email_user = (
@@ -497,18 +471,10 @@ def update_user_profile_service(
                 "Email is already registered."
             )
 
-    # ========================================================================
-    # DETECT EMAIL CHANGE
-    # ========================================================================
-
     email_changed = (
         normalized_email is not None
         and normalized_email != user.email
     )
-
-    # ========================================================================
-    # APPLY PROFILE CHANGES
-    # ========================================================================
 
     update_user_profile(
         db,
@@ -516,20 +482,9 @@ def update_user_profile_service(
         changes,
     )
 
-    # ========================================================================
-    # EMAIL VERIFICATION / SESSION INVALIDATION
-    #
-    # Only an actual email change invalidates existing sessions.
-    # Updating other profile fields leaves token_version unchanged.
-    # ========================================================================
-
     if email_changed:
         user.is_verified = False
         user.token_version += 1
-
-    # ========================================================================
-    # UPDATED TIMESTAMP
-    # ========================================================================
 
     user.updated_at = datetime.now(
         timezone.utc
@@ -583,15 +538,33 @@ def activate_user(
     """
     Activate a user account.
 
+    This operation also clears any scheduled suspension metadata.
+
+    Activation invalidates existing authentication sessions by
+    incrementing token_version.
+
     The transaction is intentionally not committed here.
     """
 
-    user.is_active = True
-    user.updated_at = datetime.now(
+    now = datetime.now(
         timezone.utc
     )
 
+    user.is_active = True
+    user.deactivated_at = None
+    user.deactivated_until = None
+    user.deactivation_reason = None
+
+    user.token_version += 1
+    user.updated_at = now
+
     db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
     db.flush()
 
     return user
@@ -604,18 +577,210 @@ def deactivate_user(
     """
     Deactivate a user account.
 
+    This is the generic account-deactivation operation.
+
     Incrementing token_version invalidates existing JWT sessions.
+    Stored authentication tokens are also invalidated.
 
     The transaction is intentionally not committed here.
     """
 
-    user.is_active = False
-    user.token_version += 1
-    user.updated_at = datetime.now(
+    now = datetime.now(
         timezone.utc
     )
 
+    user.is_active = False
+    user.deactivated_at = None
+    user.deactivated_until = None
+    user.deactivation_reason = None
+
+    user.token_version += 1
+    user.updated_at = now
+
     db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
+    db.flush()
+
+    return user
+
+
+def suspend_user(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+    duration_hours: int,
+    reason: str | None = None,
+) -> User:
+    """
+    Temporarily suspend a user account.
+
+    Security rules:
+
+    - Only administrators may perform this operation through the
+      protected API workflow.
+    - Administrators cannot suspend themselves.
+    - An already inactive account cannot be suspended again.
+    - The final active administrator cannot be suspended.
+    - Duration must be a whole number of hours.
+    - Minimum duration is 1 hour.
+    - Maximum duration is 90 days / 2160 hours.
+    - Reason is optional and limited to 500 characters.
+    - The user's existing role is preserved.
+    - Existing JWT sessions are invalidated through token_version.
+    - Stored authentication tokens are invalidated.
+    - Suspension metadata is persisted on the user record.
+    - The operation is flushed but not committed.
+
+    ``deactivated_at`` records the suspension start time.
+
+    ``deactivated_until`` records the automatic reactivation time.
+
+    ``deactivation_reason`` stores the optional administrative reason.
+
+    Raises:
+        ValueError:
+            If the operation violates any suspension rule.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot suspend themselves."
+        )
+
+    if not isinstance(duration_hours, int) or isinstance(
+        duration_hours,
+        bool,
+    ):
+        raise ValueError(
+            "Suspension duration must be a whole number of hours."
+        )
+
+    if duration_hours < MIN_SUSPENSION_HOURS:
+        raise ValueError(
+            "Suspension duration must be at least 1 hour."
+        )
+
+    if duration_hours > MAX_SUSPENSION_HOURS:
+        raise ValueError(
+            "Suspension duration cannot exceed 90 days."
+        )
+
+    if not target_user.is_active:
+        raise ValueError(
+            "User account is already inactive."
+        )
+
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role == UserRole.ADMIN:
+        active_admin_count = count_active_users_by_role(
+            db,
+            UserRole.ADMIN,
+        )
+
+        if active_admin_count <= 1:
+            raise ValueError(
+                "The last active administrator cannot be suspended."
+            )
+
+    if reason is not None:
+        if not isinstance(reason, str):
+            raise ValueError(
+                "Suspension reason must be a string or null."
+            )
+
+        reason = reason.strip()
+
+        if not reason:
+            reason = None
+
+        if reason is not None and len(reason) > 500:
+            raise ValueError(
+                "Suspension reason cannot exceed 500 characters."
+            )
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    deactivated_until = (
+        now
+        + timedelta(
+            hours=duration_hours
+        )
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = now
+    target_user.deactivated_until = deactivated_until
+    target_user.deactivation_reason = reason
+
+    target_user.token_version += 1
+    target_user.updated_at = now
+
+    db.add(target_user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=target_user.id,
+    )
+
+    db.flush()
+
+    return target_user
+
+
+def activate_suspended_user(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Reactivate a temporarily suspended account.
+
+    This function is intended for both:
+
+    - manual administrator activation;
+    - automatic scheduled reactivation.
+
+    The user's existing role is preserved.
+
+    Suspension metadata is cleared.
+
+    Authentication sessions are invalidated again to ensure that
+    no stale authentication state survives the suspension lifecycle.
+
+    The transaction is intentionally not committed here.
+    """
+
+    now = datetime.now(
+        timezone.utc
+    )
+
+    user.is_active = True
+    user.deactivated_at = None
+    user.deactivated_until = None
+    user.deactivation_reason = None
+
+    user.token_version += 1
+    user.updated_at = now
+
+    db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
     db.flush()
 
     return user
@@ -890,6 +1055,7 @@ def change_user_password(
     Security:
     - Password is hashed with the central security service.
     - Existing JWT sessions are invalidated.
+    - Existing stored authentication tokens are invalidated.
     - password_changed_at is updated.
 
     Transaction behavior:
@@ -915,6 +1081,12 @@ def change_user_password(
     user.updated_at = now
 
     db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
     db.flush()
 
     return user
@@ -930,10 +1102,12 @@ def invalidate_user_sessions(
     user: User,
 ) -> User:
     """
-    Invalidate all existing JWT sessions for a user.
+    Invalidate all existing authentication sessions for a user.
 
-    Incrementing token_version causes previously issued
-    JWTs to become invalid.
+    Security behavior:
+
+    - Increment token_version to invalidate previously issued JWTs.
+    - Invalidate all unused stored authentication tokens.
 
     The transaction is intentionally not committed here.
     """
@@ -944,6 +1118,73 @@ def invalidate_user_sessions(
     )
 
     db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
     db.flush()
 
     return user
+
+# ============================================================================
+# AUTOMATIC SUSPENSION EXPIRATION
+# ============================================================================
+
+
+def reactivate_expired_suspended_users(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> list[User]:
+    """
+    Reactivate users whose temporary suspensions have expired.
+
+    This function is intended for scheduled/background execution.
+
+    Workflow:
+
+    1. Retrieve suspended users whose deactivation deadline has
+       been reached.
+    2. Reactivate each account using the central suspension
+       activation workflow.
+    3. Preserve each user's existing role.
+    4. Clear suspension metadata.
+    5. Invalidate authentication sessions again.
+    6. Flush all changes without committing.
+
+    Args:
+        db:
+            Active SQLAlchemy session.
+
+        now:
+            Optional UTC timestamp used for deterministic tests.
+            When omitted, the repository determines the current
+            UTC time.
+
+    Returns:
+        A list of users successfully reactivated during this
+        execution.
+
+    Transaction behavior:
+
+        Changes are flushed but NOT committed. The caller controls
+        transaction commit or rollback.
+    """
+
+    expired_users = get_expired_suspended_users(
+        db,
+        now=now,
+    )
+
+    reactivated_users: list[User] = []
+
+    for user in expired_users:
+        activate_suspended_user(
+            db,
+            user,
+        )
+        reactivated_users.append(user)
+
+    return reactivated_users

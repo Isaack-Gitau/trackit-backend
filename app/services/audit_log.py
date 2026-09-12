@@ -68,6 +68,8 @@ def create_audit_log(
     success: bool = True,
     description: str | None = None,
     user_id: int | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> AuditLog:
@@ -88,6 +90,46 @@ def create_audit_log(
 
     The record is added to the current SQLAlchemy transaction.
     The caller controls when the transaction is committed.
+
+    Args:
+        db:
+            Active SQLAlchemy session.
+
+        event_type:
+            Type of audit event being recorded.
+
+        success:
+            Whether the audited operation succeeded.
+
+        description:
+            Safe human-readable description of the event.
+
+        user_id:
+            ID of the authenticated user responsible for the event,
+            when applicable. May be None for anonymous or automated
+            system events.
+
+        resource_type:
+            Type of resource affected by the event, for example
+            "user", "item", "claim", or "report".
+
+        resource_id:
+            ID of the affected resource, when applicable.
+
+        ip_address:
+            Request source IP address, when available.
+
+        user_agent:
+            Request user-agent string, when available.
+
+    Returns:
+        The newly created AuditLog instance.
+
+    Security note:
+
+        Automated system actions should leave user_id as None when
+        there is no authenticated human actor. The affected object
+        should instead be represented by resource_type/resource_id.
     """
 
     audit_log = AuditLog(
@@ -95,6 +137,8 @@ def create_audit_log(
         success=success,
         description=description,
         user_id=user_id,
+        resource_type=resource_type,
+        resource_id=resource_id,
         ip_address=ip_address,
         user_agent=user_agent,
     )

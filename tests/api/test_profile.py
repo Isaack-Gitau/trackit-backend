@@ -69,10 +69,13 @@ from app.models.notification import Notification
 from app.models.report import Report
 from app.models.user import User
 from app.services.user import (
+    activate_suspended_user,
     demote_admin_to_moderator_service,
     promote_moderator_to_admin_service,
     promote_user_to_moderator_service,
     revoke_moderator_service,
+    suspend_user,
+
 )
 
 
@@ -3721,3 +3724,1725 @@ def test_last_admin_invariant_is_enforced_by_service(
     db.refresh(admin)
 
     assert admin.role == UserRole.ADMIN
+
+
+# ============================================================================
+# ACCOUNT SUSPENSION SERVICE
+# ============================================================================
+
+
+def test_suspend_user_service_successfully_suspends_account(
+    db: Session,
+):
+    """
+    A valid suspension deactivates the target account and records the
+    suspension metadata.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4101,
+        username="suspendserviceadmin",
+        email="suspendserviceadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4102,
+        username="suspensiontarget",
+        email="suspensiontarget@example.com",
+    )
+
+    original_token_version = target_user.token_version
+
+    suspended = suspend_user(
+        db,
+        target_user=target_user,
+        acting_admin=admin,
+        duration_hours=24,
+        reason="Temporary policy violation.",
+    )
+
+    assert suspended is target_user
+    assert suspended.is_active is False
+    assert suspended.deactivated_at is not None
+    assert suspended.deactivated_until is not None
+    assert suspended.deactivation_reason == (
+        "Temporary policy violation."
+    )
+    assert suspended.deactivated_until > suspended.deactivated_at
+    assert suspended.token_version == (
+        original_token_version + 1
+    )
+
+
+def test_suspend_user_service_preserves_role(
+    db: Session,
+):
+    """
+    Suspension changes account activity state but never changes the user's
+    role.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4103,
+        username="suspendroleadmin",
+        email="suspendroleadmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=4104,
+        username="suspendmoderator",
+        email="suspendmoderator@example.com",
+    )
+
+    original_role = target_moderator.role
+
+    suspended = suspend_user(
+        db,
+        target_user=target_moderator,
+        acting_admin=admin,
+        duration_hours=12,
+    )
+
+    assert suspended.role == original_role
+    assert suspended.role == UserRole.MODERATOR
+    assert suspended.is_active is False
+
+
+def test_suspend_user_service_rejects_self_suspension(
+    db: Session,
+):
+    """
+    An administrator cannot suspend their own account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4105,
+        username="selfsuspendadmin",
+        email="selfsuspendadmin@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="cannot suspend themselves",
+    ):
+        suspend_user(
+            db,
+            target_user=admin,
+            acting_admin=admin,
+            duration_hours=24,
+        )
+
+    db.refresh(admin)
+
+    assert admin.is_active is True
+    assert admin.deactivated_at is None
+    assert admin.deactivated_until is None
+    assert admin.deactivation_reason is None
+
+
+@pytest.mark.parametrize(
+    "duration_hours",
+    [
+        0,
+        -1,
+        2161,
+    ],
+)
+def test_suspend_user_service_rejects_invalid_duration(
+    db: Session,
+    duration_hours: int,
+):
+    """
+    Suspension duration must be between one hour and ninety days.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4110 + abs(duration_hours),
+        username=f"invaliddurationadmin{abs(duration_hours)}",
+        email=f"invaliddurationadmin{abs(duration_hours)}@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4120 + abs(duration_hours),
+        username=f"invaliddurationtarget{abs(duration_hours)}",
+        email=f"invaliddurationtarget{abs(duration_hours)}@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="duration",
+    ):
+        suspend_user(
+            db,
+            target_user=target_user,
+            acting_admin=admin,
+            duration_hours=duration_hours,
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_suspend_user_service_rejects_boolean_duration(
+    db: Session,
+):
+    """
+    Boolean values must not be accepted as suspension durations even though
+    bool is a subclass of int in Python.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4131,
+        username="booldurationadmin",
+        email="booldurationadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4132,
+        username="booldurationtarget",
+        email="booldurationtarget@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="duration",
+    ):
+        suspend_user(
+            db,
+            target_user=target_user,
+            acting_admin=admin,
+            duration_hours=True,
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+
+
+def test_suspend_user_service_rejects_already_inactive_user(
+    db: Session,
+):
+    """
+    An account that is already inactive cannot be suspended again.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4141,
+        username="alreadyinactiveadmin",
+        email="alreadyinactiveadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4142,
+        username="alreadyinactive",
+        email="alreadyinactive@example.com",
+    )
+
+    target_user.is_active = False
+    db.flush()
+
+    with pytest.raises(
+        ValueError,
+        match="already inactive",
+    ):
+        suspend_user(
+            db,
+            target_user=target_user,
+            acting_admin=admin,
+            duration_hours=24,
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_suspend_user_service_rejects_last_active_admin(
+    db: Session,
+):
+    """
+    The last active administrator cannot be suspended.
+
+    The acting administrator is intentionally not persisted because the
+    database must contain exactly one active administrator for this test.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4151,
+        username="lastactiveadmin",
+        email="lastactiveadmin@example.com",
+    )
+
+    acting_admin = User(
+        id=4152,
+        username="differentactingadmin",
+        first_name="Different",
+        last_name="Admin",
+        email="differentactingadmin@example.com",
+        password_hash="test-password-hash",
+        role=UserRole.ADMIN,
+        is_active=True,
+        is_verified=True,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="last active administrator",
+    ):
+        suspend_user(
+            db,
+            target_user=admin,
+            acting_admin=acting_admin,
+            duration_hours=24,
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+    assert admin.is_active is True
+    assert admin.deactivated_at is None
+    assert admin.deactivated_until is None
+    assert admin.deactivation_reason is None
+
+def test_activate_suspended_user_service_preserves_role(
+    db: Session,
+):
+    """
+    Activation restores account access without changing the user's role.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4211,
+        username="activateroleadmin",
+        email="activateroleadmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=4212,
+        username="activaterolemoderator",
+        email="activaterolemoderator@example.com",
+    )
+
+    suspend_user(
+        db,
+        target_user=target_moderator,
+        acting_admin=admin,
+        duration_hours=24,
+    )
+
+    activate_suspended_user(
+        db,
+        target_moderator,
+    )
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.is_active is True
+    assert target_moderator.role == UserRole.MODERATOR
+
+def test_reactivate_expired_suspended_users_service_reactivates_expired_account(
+    db: Session,
+):
+    """
+    An expired temporary suspension is automatically removed and
+    the account is reactivated.
+    """
+
+    from app.services.user import (
+        reactivate_expired_suspended_users,
+        suspend_user,
+    )
+
+    admin = create_admin(
+        db,
+        user_id=4221,
+        username="expirationadmin",
+        email="expirationadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4222,
+        username="expireduser",
+        email="expireduser@example.com",
+    )
+
+    original_role = target_user.role
+    original_token_version = target_user.token_version
+
+    suspend_user(
+        db,
+        target_user=target_user,
+        acting_admin=admin,
+        duration_hours=1,
+        reason="Temporary suspension.",
+    )
+
+    db.refresh(target_user)
+
+    assert target_user.deactivated_until is not None
+
+    expired_time = target_user.deactivated_until + timedelta(
+        seconds=1
+    )
+
+    reactivated_users = reactivate_expired_suspended_users(
+        db,
+        now=expired_time,
+    )
+
+    db.refresh(target_user)
+
+    assert target_user in reactivated_users
+    assert target_user.is_active is True
+    assert target_user.role == original_role
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+    assert target_user.token_version == original_token_version + 2
+
+
+def test_reactivate_expired_suspended_users_service_leaves_future_suspension_untouched(
+    db: Session,
+):
+    """
+    A suspension whose deadline has not yet been reached remains
+    active.
+    """
+
+    from app.services.user import (
+        reactivate_expired_suspended_users,
+        suspend_user,
+    )
+
+    admin = create_admin(
+        db,
+        user_id=4231,
+        username="futureexpirationadmin",
+        email="futureexpirationadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4232,
+        username="futureuser",
+        email="futureuser@example.com",
+    )
+
+    suspend_user(
+        db,
+        target_user=target_user,
+        acting_admin=admin,
+        duration_hours=24,
+    )
+
+    db.refresh(target_user)
+
+    assert target_user.deactivated_until is not None
+
+    suspension_deadline = target_user.deactivated_until
+
+    reactivated_users = reactivate_expired_suspended_users(
+        db,
+        now=(
+            suspension_deadline
+            - timedelta(
+                seconds=1
+            )
+        ),
+    )
+
+    db.refresh(target_user)
+
+    assert reactivated_users == []
+    assert target_user.is_active is False
+    assert target_user.deactivated_until == suspension_deadline
+
+
+def test_reactivate_expired_suspended_users_service_processes_multiple_accounts(
+    db: Session,
+):
+    """
+    Multiple expired suspended accounts are reactivated during a
+    single expiration run.
+    """
+
+    from app.services.user import (
+        reactivate_expired_suspended_users,
+        suspend_user,
+    )
+
+    admin = create_admin(
+        db,
+        user_id=4241,
+        username="multipleexpirationadmin",
+        email="multipleexpirationadmin@example.com",
+    )
+
+    first_user = create_test_user(
+        db,
+        user_id=4242,
+        username="expiredfirst",
+        email="expiredfirst@example.com",
+    )
+
+    second_user = create_test_user(
+        db,
+        user_id=4243,
+        username="expiredsecond",
+        email="expiredsecond@example.com",
+    )
+
+    suspend_user(
+        db,
+        target_user=first_user,
+        acting_admin=admin,
+        duration_hours=1,
+    )
+
+    suspend_user(
+        db,
+        target_user=second_user,
+        acting_admin=admin,
+        duration_hours=2,
+    )
+
+    db.refresh(first_user)
+    db.refresh(second_user)
+
+    assert first_user.deactivated_until is not None
+    assert second_user.deactivated_until is not None
+
+    expiration_time = max(
+        first_user.deactivated_until,
+        second_user.deactivated_until,
+    ) + timedelta(
+        seconds=1
+    )
+
+    reactivated_users = reactivate_expired_suspended_users(
+        db,
+        now=expiration_time,
+    )
+
+    db.refresh(first_user)
+    db.refresh(second_user)
+
+    assert len(reactivated_users) == 2
+
+    assert first_user.is_active is True
+    assert second_user.is_active is True
+
+    assert first_user.deactivated_until is None
+    assert second_user.deactivated_until is None
+
+    assert first_user.deactivation_reason is None
+    assert second_user.deactivation_reason is None
+
+
+def test_reactivate_expired_suspended_users_service_ignores_unscheduled_inactive_account(
+    db: Session,
+):
+    """
+    An inactive account without a scheduled suspension is not
+    automatically reactivated.
+    """
+
+    from app.services.user import (
+        reactivate_expired_suspended_users,
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4252,
+        username="unscheduledinactive",
+        email="unscheduledinactive@example.com",
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = None
+    target_user.deactivated_until = None
+    target_user.deactivation_reason = None
+
+    db.flush()
+
+    reactivated_users = reactivate_expired_suspended_users(
+        db,
+        now=datetime.now(timezone.utc) + timedelta(days=365),
+    )
+
+    db.refresh(target_user)
+
+    assert reactivated_users == []
+    assert target_user.is_active is False
+    assert target_user.deactivated_until is None
+
+
+def test_suspend_and_activate_service_changes_can_be_rolled_back(
+    db: Session,
+):
+    """
+    Suspension and activation remain flush-only operations and participate
+    correctly in the surrounding transaction.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4221,
+        username="rollbacksuspendadmin",
+        email="rollbacksuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4222,
+        username="rollbacksuspendtarget",
+        email="rollbacksuspendtarget@example.com",
+    )
+
+    target_user_id = target_user.id
+    original_token_version = target_user.token_version
+
+    nested = db.begin_nested()
+
+    suspended = suspend_user(
+        db,
+        target_user=target_user,
+        acting_admin=admin,
+        duration_hours=24,
+        reason="Rollback test.",
+    )
+
+    assert suspended.is_active is False
+    assert suspended.deactivation_reason == "Rollback test."
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_user_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.is_active is True
+    assert restored_user.deactivated_at is None
+    assert restored_user.deactivated_until is None
+    assert restored_user.deactivation_reason is None
+    assert restored_user.token_version == original_token_version
+
+
+# ============================================================================
+# ACCOUNT SUSPENSION API
+# ============================================================================
+
+
+def test_admin_can_suspend_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator can temporarily suspend an active user.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4301,
+        username="apisuspendadmin",
+        email="apisuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4302,
+        username="apisuspendtarget",
+        email="apisuspendtarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "API suspension test.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["is_active"] is False
+    assert data["role"] == UserRole.USER
+    assert data["deactivation_reason"] == (
+        "API suspension test."
+    )
+    assert data["deactivated_at"] is not None
+    assert data["deactivated_until"] is not None
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivation_reason == (
+        "API suspension test."
+    )
+
+
+def test_admin_can_suspend_moderator_without_changing_role(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspending a moderator does not alter the moderator's role.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4311,
+        username="apisuspendmoderatoradmin",
+        email="apisuspendmoderatoradmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=4312,
+        username="apisuspendmoderator",
+        email="apisuspendmoderator@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 48,
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["is_active"] is False
+    assert data["role"] == UserRole.MODERATOR
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.is_active is False
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_moderator_cannot_suspend_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators do not have permission to suspend accounts.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=4321,
+        username="moderatorsuspendattempt",
+        email="moderatorsuspendattempt@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4322,
+        username="moderatorsuspendtarget",
+        email="moderatorsuspendtarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(moderator),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_regular_user_cannot_suspend_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Regular users do not have permission to suspend accounts.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=4331,
+        username="usersuspendattempt",
+        email="usersuspendattempt@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4332,
+        username="usersuspendtarget",
+        email="usersuspendtarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(user),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_unauthenticated_user_cannot_suspend_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspension requires authentication.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=4341,
+        username="unauthenticatedtarget",
+        email="unauthenticatedtarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 401
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+
+
+def test_admin_suspend_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspending a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4351,
+        username="missingtargetadmin",
+        email="missingtargetadmin@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile/admin/999999/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize(
+    "duration_hours",
+    [
+        0,
+        -1,
+        2161,
+    ],
+)
+def test_admin_suspend_invalid_duration_returns_422(
+    client: TestClient,
+    db: Session,
+    duration_hours: int,
+):
+    """
+    The API schema rejects suspension durations outside the supported range.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4360 + abs(duration_hours),
+        username=f"apiinvaliddurationadmin{abs(duration_hours)}",
+        email=(
+            f"apiinvaliddurationadmin{abs(duration_hours)}"
+            "@example.com"
+        ),
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4370 + abs(duration_hours),
+        username=f"apiinvaliddurationtarget{abs(duration_hours)}",
+        email=(
+            f"apiinvaliddurationtarget{abs(duration_hours)}"
+            "@example.com"
+        ),
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": duration_hours,
+        },
+    )
+
+    assert response.status_code == 422
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_admin_suspend_self_returns_409(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator cannot suspend their own account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4381,
+        username="apiselfsuspend",
+        email="apiselfsuspend@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{admin.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+
+    assert admin.is_active is True
+    assert admin.deactivated_at is None
+    assert admin.deactivated_until is None
+
+
+def test_admin_cannot_suspend_already_inactive_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An already inactive account cannot be suspended again.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4391,
+        username="apiinactiveadmin",
+        email="apiinactiveadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4392,
+        username="apiinactiveuser",
+        email="apiinactiveuser@example.com",
+    )
+
+    target_user.is_active = False
+    db.flush()
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+
+def test_admin_suspend_normalizes_whitespace_reason(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Whitespace-only suspension reasons are stored as null.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4401,
+        username="apiwhitespacereasonadmin",
+        email="apiwhitespacereasonadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4402,
+        username="apiwhitespacereasontarget",
+        email="apiwhitespacereasontarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "     ",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["deactivation_reason"] is None
+
+    db.refresh(target_user)
+
+    assert target_user.deactivation_reason is None
+
+
+def test_admin_suspend_rejects_reason_over_500_characters(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspension reasons longer than 500 characters are rejected by the API.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4411,
+        username="apilongreasonadmin",
+        email="apilongreasonadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4412,
+        username="apilongreasontarget",
+        email="apilongreasontarget@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "x" * 501,
+        },
+    )
+
+    assert response.status_code == 422
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+def test_admin_suspend_invalidates_stored_auth_tokens(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspending a user invalidates all unused stored authentication tokens.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4421,
+        username="tokensuspendadmin",
+        email="tokensuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4422,
+        username="tokensuspendtarget",
+        email="tokensuspendtarget@example.com",
+    )
+
+    auth_token = AuthToken(
+        user_id=target_user.id,
+        token_hash="b" * 64,
+        token_type="password_reset",
+        expires_at=(
+            datetime.now(timezone.utc)
+            + timedelta(minutes=15)
+        ),
+    )
+
+    db.add(auth_token)
+    db.flush()
+
+    token_id = auth_token.id
+
+    assert auth_token.used_at is None
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 200
+
+    db.expire_all()
+
+    stored_token = db.get(
+        AuthToken,
+        token_id,
+    )
+
+    assert stored_token is not None
+    assert stored_token.used_at is not None
+
+
+def test_admin_suspend_creates_audit_log(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A successful account suspension creates an administrator audit record.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4431,
+        username="auditsuspendadmin",
+        email="auditsuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4432,
+        username="auditsuspendtarget",
+        email="auditsuspendtarget@example.com",
+    )
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 48,
+            "reason": "Audit suspension test.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    assert after_audit_count == (
+        before_audit_count + 1
+    )
+
+    audit_log = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.user_id == admin.id,
+            AuditLog.action == "admin_action",
+        )
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+
+    assert audit_log is not None
+    assert audit_log.success is True
+    assert audit_log.description is not None
+    assert "suspended user" in audit_log.description
+    assert str(target_user.id) in audit_log.description
+    assert "48 hours" in audit_log.description
+
+
+def test_admin_cannot_suspend_last_active_admin_via_api(
+    client: TestClient,
+    db: Session,
+):
+    """
+    The API enforces the last-active-administrator protection.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4441,
+        username="apilastactiveadmin",
+        email="apilastactiveadmin@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{admin.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 409
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+    assert admin.is_active is True
+    assert admin.deactivated_at is None
+    assert admin.deactivated_until is None
+    assert admin.deactivation_reason is None
+
+
+def test_admin_activate_creates_audit_log(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A successful manual account reactivation creates an administrator
+    audit record.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4451,
+        username="auditactivateadmin",
+        email="auditactivateadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4452,
+        username="auditactivatetarget",
+        email="auditactivatetarget@example.com",
+    )
+
+    suspend_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "Prepare activation audit test.",
+        },
+    )
+
+    assert suspend_response.status_code == 200
+
+    before_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["is_active"] is True
+    assert data["deactivated_at"] is None
+    assert data["deactivated_until"] is None
+    assert data["deactivation_reason"] is None
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+
+    after_audit_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    assert after_audit_count == (
+        before_audit_count + 1
+    )
+
+    audit_log = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.user_id == admin.id,
+            AuditLog.action == "admin_action",
+        )
+        .order_by(AuditLog.id.desc())
+        .first()
+    )
+
+    assert audit_log is not None
+    assert audit_log.success is True
+    assert audit_log.description is not None
+    assert "reactivated user" in audit_log.description
+    assert str(target_user.id) in audit_log.description
+
+# ============================================================================
+# ACCOUNT SUSPENSION SECURITY / ACTIVATION API
+# ============================================================================
+
+
+def test_suspended_user_existing_jwt_is_invalidated(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Suspending a user invalidates JWT access that was issued before
+    the suspension.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4501,
+        username="jwtsuspendadmin",
+        email="jwtsuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4502,
+        username="jwtsuspendtarget",
+        email="jwtsuspendtarget@example.com",
+    )
+
+    target_headers = authenticated_headers(target_user)
+
+    response = client.get(
+        "/api/profile",
+        headers=target_headers,
+    )
+
+    assert response.status_code == 200
+
+    original_token_version = target_user.token_version
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "JWT invalidation test.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.token_version == (
+        original_token_version + 1
+    )
+
+    response = client.get(
+        "/api/profile",
+        headers=target_headers,
+    )
+
+    assert response.status_code == 401
+
+
+def test_admin_can_manually_reactivate_suspended_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator can manually reactivate a suspended account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4511,
+        username="activateadmin",
+        email="activateadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4512,
+        username="activatetarget",
+        email="activatetarget@example.com",
+    )
+
+    suspend_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "Manual activation test.",
+        },
+    )
+
+    assert suspend_response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivated_at is not None
+    assert target_user.deactivated_until is not None
+    assert target_user.deactivation_reason == (
+        "Manual activation test."
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["is_active"] is True
+    assert data["deactivated_at"] is None
+    assert data["deactivated_until"] is None
+    assert data["deactivation_reason"] is None
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+
+
+def test_manual_activation_preserves_user_role(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Manual activation restores account access without changing the
+    suspended user's role.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4521,
+        username="activateuserroleadmin",
+        email="activateuserroleadmin@example.com",
+    )
+
+    target_moderator = create_moderator(
+        db,
+        user_id=4522,
+        username="activateusermoderator",
+        email="activateusermoderator@example.com",
+    )
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert response.status_code == 200
+
+    response = client.patch(
+        f"/api/profile/admin/{target_moderator.id}/activate",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["is_active"] is True
+    assert data["role"] == UserRole.MODERATOR
+
+    db.refresh(target_moderator)
+
+    assert target_moderator.is_active is True
+    assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_moderator_cannot_manually_activate_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators do not have permission to manually activate accounts.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=4531,
+        username="moderatoractivateattempt",
+        email="moderatoractivateattempt@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4532,
+        username="moderatoractivatetarget",
+        email="moderatoractivatetarget@example.com",
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = datetime.now(
+        timezone.utc
+    )
+    target_user.deactivated_until = (
+        datetime.now(timezone.utc)
+        + timedelta(hours=24)
+    )
+    target_user.deactivation_reason = (
+        "Activation authorization test."
+    )
+    db.flush()
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivation_reason == (
+        "Activation authorization test."
+    )
+
+
+def test_regular_user_cannot_manually_activate_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Regular users do not have permission to manually activate accounts.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=4541,
+        username="useractivateattempt",
+        email="useractivateattempt@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4542,
+        username="useractivatetarget",
+        email="useractivatetarget@example.com",
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = datetime.now(
+        timezone.utc
+    )
+    target_user.deactivated_until = (
+        datetime.now(timezone.utc)
+        + timedelta(hours=24)
+    )
+    target_user.deactivation_reason = (
+        "Activation authorization test."
+    )
+    db.flush()
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+        headers=authenticated_headers(user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivation_reason == (
+        "Activation authorization test."
+    )
+
+
+def test_unauthenticated_user_cannot_manually_activate_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Manual activation requires authentication.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=4551,
+        username="unauthenticatedactivationtarget",
+        email="unauthenticatedactivationtarget@example.com",
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = datetime.now(
+        timezone.utc
+    )
+    target_user.deactivated_until = (
+        datetime.now(timezone.utc)
+        + timedelta(hours=24)
+    )
+    db.flush()
+
+    response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+    )
+
+    assert response.status_code == 401
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+
+
+def test_admin_activate_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Activating a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4561,
+        username="missingactivationadmin",
+        email="missingactivationadmin@example.com",
+    )
+
+    response = client.patch(
+        "/api/profile/admin/999999/activate",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+
+
+def test_manual_activation_invalidates_old_jwt(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Manual activation increments token_version so a JWT issued before
+    the suspension/activation cycle cannot be reused.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4571,
+        username="activationtokenadmin",
+        email="activationtokenadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4572,
+        username="activationtokentarget",
+        email="activationtokentarget@example.com",
+    )
+
+    old_headers = authenticated_headers(target_user)
+
+    original_token_version = target_user.token_version
+
+    suspend_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+        },
+    )
+
+    assert suspend_response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.token_version == (
+        original_token_version + 1
+    )
+
+    suspended_token_version = target_user.token_version
+
+    activate_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/activate",
+        headers=authenticated_headers(admin),
+    )
+
+    assert activate_response.status_code == 200
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.token_version == (
+        suspended_token_version + 1
+    )
+
+    response = client.get(
+        "/api/profile",
+        headers=old_headers,
+    )
+
+    assert response.status_code == 401

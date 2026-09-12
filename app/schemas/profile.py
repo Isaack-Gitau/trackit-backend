@@ -17,6 +17,12 @@ Profile fields include:
 - social links
 - preferences
 
+Administrative account-status fields include:
+- role
+- active/inactive status
+- suspension timestamps
+- suspension reason
+
 Authentication and authorization secrets are deliberately
 excluded from all profile responses.
 """
@@ -133,6 +139,16 @@ class AdminUserDetailResponse(BaseModel):
 
     password_changed_at: datetime | None = None
 
+    # ------------------------------------------------------------------------
+    # SUSPENSION STATUS
+    # ------------------------------------------------------------------------
+
+    deactivated_at: datetime | None = None
+
+    deactivated_until: datetime | None = None
+
+    deactivation_reason: str | None = None
+
     # ========================================================================
     # PROFILE INFORMATION
     # ========================================================================
@@ -160,6 +176,64 @@ class AdminUserDetailResponse(BaseModel):
     created_at: datetime
 
     updated_at: datetime
+
+
+# ============================================================================
+# USER SUSPENSION REQUEST
+# ============================================================================
+
+
+class UserSuspensionRequest(BaseModel):
+    """
+    Request body used by administrators to temporarily
+    suspend a user account.
+
+    Duration is expressed in whole hours.
+
+    Business-level duration limits are enforced by the
+    user service. API-level validation also rejects values
+    that are obviously outside the supported range.
+    """
+
+    duration_hours: int = Field(
+        ...,
+        ge=1,
+        le=2160,
+        description=(
+            "Suspension duration in whole hours. "
+            "Minimum: 1 hour. Maximum: 2160 hours (90 days)."
+        ),
+    )
+
+    reason: str | None = Field(
+        default=None,
+        max_length=500,
+        description=(
+            "Optional reason for the suspension."
+        ),
+    )
+
+    @field_validator("reason")
+    @classmethod
+    def normalize_reason(
+        cls,
+        value: str | None,
+    ) -> str | None:
+        """
+        Normalize the optional suspension reason.
+
+        Whitespace-only reasons are treated as no reason.
+        """
+
+        if value is None:
+            return None
+
+        value = value.strip()
+
+        if not value:
+            return None
+
+        return value
 
 
 # ============================================================================

@@ -32,7 +32,6 @@ from app.core.constants import UserRole
 from app.models.item import Item
 from app.models.user import User
 
-
 # ============================================================================
 # PROFILE UPDATE FIELDS
 # ============================================================================
@@ -259,6 +258,78 @@ def count_users_by_role(
 
     return int(
         result.scalar_one()
+    )
+
+
+def count_active_users_by_role(
+    db: Session,
+    role: str,
+) -> int:
+    """
+    Count active users currently assigned to a specific role.
+
+    This function performs a database read only.
+
+    Role values should normally come from the centralized
+    UserRole constants.
+    """
+
+    result = db.execute(
+        select(
+            func.count(User.id)
+        ).where(
+            User.role == role,
+            User.is_active.is_(True),
+        )
+    )
+
+    return int(
+        result.scalar_one()
+    )
+
+
+def get_expired_suspended_users(
+    db: Session,
+    *,
+    now: datetime | None = None,
+) -> list[User]:
+    """
+    Retrieve currently suspended users whose scheduled suspension
+    has expired.
+
+    The repository performs database access only. Reactivation
+    business logic belongs in the service layer.
+
+    Args:
+        db: Active SQLAlchemy session.
+        now: Optional UTC timestamp used for deterministic tests.
+            When omitted, the current UTC time is used.
+
+    Returns:
+        A list of suspended users whose deactivation deadline
+        has been reached.
+    """
+
+    if now is None:
+        now = datetime.now(
+            timezone.utc
+        )
+
+    result = db.execute(
+        select(User)
+        .where(
+            User.is_active.is_(False),
+            User.deactivated_until.is_not(None),
+            User.deactivated_until <= now,
+        )
+        .order_by(
+            User.deactivated_until.asc(),
+            User.id.asc(),
+        )
+    )
+
+    return list(
+        result.scalars().all()
     )
 
 

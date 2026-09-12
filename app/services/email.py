@@ -19,6 +19,7 @@ Security principles:
 
 from __future__ import annotations
 
+from datetime import datetime
 from email.message import EmailMessage
 from html import escape
 from urllib.parse import quote
@@ -446,6 +447,186 @@ Your password will remain unchanged.
     await _send_email(
         recipient=recipient,
         subject="Reset your TRACKIT password",
+        html_body=html_body,
+        text_body=text_body,
+    )
+
+# ============================================================================
+# ACCOUNT REACTIVATION
+# ============================================================================
+
+
+async def send_account_reactivation_email(
+    *,
+    recipient: str,
+    reactivated_at: datetime,
+    reason: str | None = None,
+) -> None:
+    """
+    Send an email notifying a user that their temporary suspension
+    has expired and their TRACKIT account has been reactivated.
+
+    The email contains the reactivation timestamp and, when
+    available, the reason that was recorded for the suspension.
+    """
+
+    if not recipient or not recipient.strip():
+        raise ValueError(
+            "Recipient email cannot be empty."
+        )
+
+    formatted_reactivated_at = reactivated_at.astimezone().strftime(
+        "%B %d, %Y at %I:%M %p %Z"
+    )
+
+    safe_reactivated_at = escape(
+        formatted_reactivated_at
+    )
+
+    safe_reason = None
+
+    if reason is not None:
+        normalized_reason = reason.strip()
+
+        if normalized_reason:
+            safe_reason = escape(
+                normalized_reason
+            )
+
+    reason_html = ""
+
+    if safe_reason is not None:
+        reason_html = f"""
+        <p style="font-size:16px;line-height:1.6;">
+            <strong>Original suspension reason:</strong><br>
+            {safe_reason}
+        </p>
+        """
+
+    reason_text = ""
+
+    if reason is not None and reason.strip():
+        reason_text = (
+            "\nOriginal suspension reason:\n"
+            f"{reason.strip()}\n"
+        )
+
+    html_body = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your TRACKIT account has been reactivated</title>
+</head>
+
+<body style="
+    margin:0;
+    padding:0;
+    background:#f8fafc;
+    font-family:Arial,Helvetica,sans-serif;
+    color:#0f172a;
+">
+
+    <div style="
+        max-width:600px;
+        margin:40px auto;
+        background:#ffffff;
+        border-radius:12px;
+        padding:40px;
+        box-shadow:0 4px 20px rgba(15,23,42,0.08);
+    ">
+
+        <h1 style="
+            margin-top:0;
+            color:#4f46e5;
+            font-size:28px;
+        ">
+            Your TRACKIT account has been reactivated
+        </h1>
+
+        <p style="font-size:16px;line-height:1.6;">
+            Your temporary account suspension has expired.
+        </p>
+
+        <p style="font-size:16px;line-height:1.6;">
+            Your TRACKIT account is now active again and you
+            can sign in normally.
+        </p>
+
+        <div style="
+            margin:25px 0;
+            padding:20px;
+            background:#f8fafc;
+            border-radius:8px;
+        ">
+            <p style="
+                margin:0;
+                font-size:14px;
+                color:#64748b;
+            ">
+                Reactivated
+            </p>
+
+            <p style="
+                margin:6px 0 0;
+                font-size:16px;
+                color:#0f172a;
+            ">
+                {safe_reactivated_at}
+            </p>
+        </div>
+
+        {reason_html}
+
+        <hr style="
+            border:none;
+            border-top:1px solid #e2e8f0;
+            margin:30px 0;
+        ">
+
+        <p style="
+            font-size:14px;
+            line-height:1.6;
+            color:#64748b;
+        ">
+            If you did not expect your account to be reactivated,
+            please contact TRACKIT support.
+        </p>
+
+        <p style="
+            font-size:14px;
+            color:#475569;
+        ">
+            — TRACKIT
+        </p>
+
+    </div>
+
+</body>
+</html>
+"""
+
+    text_body = f"""
+TRACKIT Account Reactivated
+
+Your temporary account suspension has expired.
+
+Your TRACKIT account is now active again and you can sign
+in normally.
+
+Reactivated:
+{formatted_reactivated_at}
+{reason_text}
+If you did not expect your account to be reactivated,
+please contact TRACKIT support.
+
+— TRACKIT
+"""
+
+    await _send_email(
+        recipient=recipient,
+        subject="Your TRACKIT account has been reactivated",
         html_body=html_body,
         text_body=text_body,
     )

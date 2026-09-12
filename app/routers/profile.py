@@ -2,8 +2,8 @@
 TRACKIT Profile Router.
 
 Provides authenticated-user profile endpoints,
-account management, user administration, and
-administrative role management.
+account management, user administration, administrative
+role management, and account suspension management.
 
 Endpoints:
 
@@ -16,6 +16,8 @@ Endpoints:
     POST   /api/profile/admin/{user_id}/promote-admin
     PATCH  /api/profile/admin/{user_id}/demote-admin
     PATCH  /api/profile/admin/{user_id}/revoke-moderator
+    PATCH  /api/profile/admin/{user_id}/deactivate
+    PATCH  /api/profile/admin/{user_id}/activate
 
 Users may:
 - View their own profile.
@@ -40,6 +42,8 @@ Administrators may:
 - Promote moderators to administrators.
 - Demote administrators to moderators.
 - Revoke moderator privileges.
+- Temporarily suspend active user accounts.
+- Manually reactivate suspended user accounts.
 
 Administrative responses deliberately exclude
 authentication and security secrets.
@@ -66,18 +70,21 @@ from app.schemas.profile import (
     AdminUserDetailResponse,
     ProfileResponse,
     ProfileUpdate,
+    UserSuspensionRequest,
 )
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
 )
 from app.services.user import (
+    activate_suspended_user,
     delete_user_account_service,
     demote_admin_to_moderator_service,
     get_user,
     promote_moderator_to_admin_service,
     promote_user_to_moderator_service,
     revoke_moderator_service,
+    suspend_user,
     update_user_profile_service,
     verify_user_password,
 )
@@ -176,28 +183,14 @@ def update_profile(
     Role changes are not accepted.
     """
 
-    # -------------------------------------------------------------------------
-    # Determine exactly which fields were supplied.
-    #
-    # exclude_unset=True is essential for PATCH semantics.
-    # -------------------------------------------------------------------------
-
     changes = profile_data.model_dump(
         exclude_unset=True
     )
-
-    # -------------------------------------------------------------------------
-    # Empty PATCH body
-    # -------------------------------------------------------------------------
 
     if not changes:
         return ProfileResponse.model_validate(
             current_user
         )
-
-    # -------------------------------------------------------------------------
-    # Update profile
-    # -------------------------------------------------------------------------
 
     try:
         updated_user = update_user_profile_service(
@@ -212,10 +205,6 @@ def update_profile(
             detail=str(exc),
         ) from exc
 
-    # -------------------------------------------------------------------------
-    # Protect against database-level uniqueness races.
-    # -------------------------------------------------------------------------
-
     except IntegrityError:
         db.rollback()
 
@@ -223,10 +212,6 @@ def update_profile(
             status_code=status.HTTP_409_CONFLICT,
             detail="Username or email is already registered.",
         ) from None
-
-    # -------------------------------------------------------------------------
-    # Return the updated profile.
-    # -------------------------------------------------------------------------
 
     return ProfileResponse.model_validate(
         updated_user
@@ -288,10 +273,6 @@ def delete_account(
         None. HTTP 204 No Content is returned on success.
     """
 
-    # -------------------------------------------------------------------------
-    # Verify current password.
-    # -------------------------------------------------------------------------
-
     if not verify_user_password(
         current_user,
         password,
@@ -301,34 +282,17 @@ def delete_account(
             detail="Current password is incorrect.",
         )
 
-    # -------------------------------------------------------------------------
-    # Collect media and delete the account inside the current
-    # database transaction.
-    # -------------------------------------------------------------------------
-
     try:
         media_storage_keys = delete_user_account_service(
             db,
             current_user,
         )
 
-        # ---------------------------------------------------------------------
-        # Explicitly commit this transaction.
-        #
-        # This endpoint needs deterministic knowledge that the database
-        # deletion succeeded before physical media files are removed.
-        # ---------------------------------------------------------------------
-
         db.commit()
 
     except Exception:
         db.rollback()
         raise
-
-    # -------------------------------------------------------------------------
-    # Remove physical media only after the database deletion has
-    # successfully committed.
-    # -------------------------------------------------------------------------
 
     for storage_key in media_storage_keys:
         try:
@@ -340,10 +304,6 @@ def delete_account(
             logger.exception(
                 "Failed to delete account media after user deletion."
             )
-
-    # -------------------------------------------------------------------------
-    # HTTP 204 response.
-    # -------------------------------------------------------------------------
 
     return None
 
@@ -378,28 +338,16 @@ def get_admin_user_profile(
     excluded by AdminUserDetailResponse.
     """
 
-    # -------------------------------------------------------------------------
-    # Retrieve target user.
-    # -------------------------------------------------------------------------
-
     user = get_user(
         db,
         user_id,
     )
-
-    # -------------------------------------------------------------------------
-    # Target user does not exist.
-    # -------------------------------------------------------------------------
 
     if user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="User not found.",
         )
-
-    # -------------------------------------------------------------------------
-    # Return the safe administrative representation.
-    # -------------------------------------------------------------------------
 
     return AdminUserDetailResponse.model_validate(
         user
@@ -676,6 +624,156 @@ def revoke_moderator(
 
         return AdminUserDetailResponse.model_validate(
             revoked_user
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# ADMIN ONLY: TEMPORARY ACCOUNT SUSPENSION
+# ============================================================================
+
+
+@router.patch(
+    "/admin/{user_id}/deactivate",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Temporarily suspend a user account",
+)
+def deactivate_user(
+    user_id: int,
+    suspension_data: UserSuspensionRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Temporarily suspend an active user account.
+
+    Only authenticated administrators may perform this action.
+
+    Suspension rules are enforced by the user service:
+
+    - Administrators cannot suspend themselves.
+    - The target must currently be active.
+    - The last active administrator cannot be suspended.
+    - Duration must be between 1 hour and 90 days.
+    - The optional reason may contain at most 500 characters.
+
+    Suspension invalidates existing authentication sessions.
+
+    The suspension metadata is stored on the user account so
+    an independent expiration worker can automatically reactivate
+    the account when the suspension period ends.
+
+    Successful suspensions are recorded in the audit log.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        suspended_user = suspend_user(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+            duration_hours=suspension_data.duration_hours,
+            reason=suspension_data.reason,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"suspended user {target_user.id} "
+                f"for {suspension_data.duration_hours} hours."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            suspended_user
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+
+# ============================================================================
+# ADMIN ONLY: MANUAL ACCOUNT ACTIVATION
+# ============================================================================
+
+
+@router.patch(
+    "/admin/{user_id}/activate",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Reactivate a suspended user account",
+)
+def activate_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserDetailResponse:
+    """
+    Manually reactivate a suspended user account.
+
+    Only authenticated administrators may perform this action.
+
+    Manual activation clears all suspension metadata and
+    invalidates existing authentication sessions.
+
+    The user's role is preserved.
+
+    Successful activations are recorded in the audit log.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    try:
+        activated_user = activate_suspended_user(
+            db,
+            target_user,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"reactivated user {target_user.id}."
+            ),
+            user_id=current_admin.id,
+        )
+
+        return AdminUserDetailResponse.model_validate(
+            activated_user
         )
 
     except ValueError as exc:

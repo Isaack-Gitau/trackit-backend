@@ -103,6 +103,37 @@ class User(Base):
         nullable=False,
     )
 
+    """
+    Timestamp at which the account was temporarily deactivated.
+
+    This is NULL when the account is not currently suspended.
+    """
+
+    deactivated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    """
+    Timestamp at which the temporary deactivation should expire.
+
+    This is NULL when the account is not currently suspended.
+    """
+
+    deactivated_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+
+    """
+    Optional reason supplied by the administrator for the deactivation.
+    """
+
+    deactivation_reason: Mapped[str | None] = mapped_column(
+        String(500),
+        nullable=True,
+    )
+
     is_verified: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
