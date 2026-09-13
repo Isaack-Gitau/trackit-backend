@@ -50,13 +50,17 @@ Coverage:
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from threading import Barrier, Thread
 from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
+from tests.conftest import TEST_DATABASE_URL
 from app.core.constants import UserRole
 from app.core.security import create_access_token, hash_password
 from app.models.audit_log import AuditLog
@@ -3444,14 +3448,13 @@ def test_database_role_is_authoritative_for_authorization(
 
     assert response.status_code == 403
 
-
 def test_revoked_moderator_token_cannot_gain_privileges_from_old_role(
     client: TestClient,
     db: Session,
 ):
     """
-    Changing the database role downward immediately removes the user's
-    ability to use moderator/admin endpoints according to the new role.
+    Changing a user's role downward invalidates previously issued
+    authentication tokens so the old token cannot retain privileges.
     """
 
     acting_admin = create_admin(
@@ -3486,8 +3489,7 @@ def test_revoked_moderator_token_cannot_gain_privileges_from_old_role(
         headers=target_headers,
     )
 
-    assert response.status_code == 403
-
+    assert response.status_code == 401
 
 # ============================================================================
 # ROLE MANAGEMENT TRANSACTION BEHAVIOR
@@ -3724,6 +3726,135 @@ def test_last_admin_invariant_is_enforced_by_service(
     db.refresh(admin)
 
     assert admin.role == UserRole.ADMIN
+
+def test_last_admin_invariant_is_concurrency_safe():
+    """
+    Concurrent admin demotion operations cannot bypass the last-admin
+    invariant.
+
+    Each operation uses an independent PostgreSQL transaction. The
+    transaction-level advisory lock serializes the invariant check so
+    only one operation can make the final-admin decision at a time.
+    """
+
+    engine = create_engine(
+        TEST_DATABASE_URL,
+        future=True,
+    )
+
+    SessionLocal = sessionmaker(
+        bind=engine,
+        autoflush=False,
+        autocommit=False,
+        expire_on_commit=False,
+    )
+
+    setup_session = SessionLocal()
+
+    admin_one = create_admin(
+        setup_session,
+        user_id=4011,
+        username="concurrencyadminone",
+        email="concurrencyadminone@example.com",
+    )
+
+    admin_two = create_admin(
+        setup_session,
+        user_id=4012,
+        username="concurrencyadmintwo",
+        email="concurrencyadmintwo@example.com",
+    )
+
+    setup_session.commit()
+    setup_session.close()
+
+    barrier = Barrier(2)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def demote_admin(
+        target_user_id: int,
+        acting_admin_id: int,
+    ) -> None:
+        session = SessionLocal()
+
+        try:
+            target_user = session.get(User, target_user_id)
+            acting_admin = session.get(User, acting_admin_id)
+
+            if target_user is None or acting_admin is None:
+                raise AssertionError(
+                    "Concurrent test users were not visible "
+                    "to the independent transaction."
+                )
+
+            barrier.wait()
+
+            try:
+                demote_admin_to_moderator_service(
+                    session,
+                    target_user=target_user,
+                    acting_admin=acting_admin,
+                )
+                session.commit()
+                results.append("success")
+            except ValueError as exc:
+                session.rollback()
+                results.append(str(exc))
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            session.close()
+
+    thread_one = Thread(
+        target=demote_admin,
+        args=(admin_one.id, admin_two.id),
+    )
+    thread_two = Thread(
+        target=demote_admin,
+        args=(admin_two.id, admin_one.id),
+    )
+
+    thread_one.start()
+    thread_two.start()
+
+    thread_one.join()
+    thread_two.join()
+
+    try:
+        assert errors == []
+
+        assert len(results) == 2
+        assert results.count("success") == 1
+        assert results.count("The last administrator cannot be demoted.") == 1
+
+        verification_session = SessionLocal()
+
+        try:
+            remaining_admins = (
+                verification_session.query(User)
+                .filter(
+                    User.role == UserRole.ADMIN,
+                    User.is_active.is_(True),
+                )
+                .count()
+            )
+
+            assert remaining_admins == 1
+        finally:
+            verification_session.close()
+    finally:
+        cleanup_session = SessionLocal()
+
+        try:
+            cleanup_session.query(User).filter(
+                User.id.in_([admin_one.id, admin_two.id])
+            ).delete(synchronize_session=False)
+
+            cleanup_session.commit()
+        finally:
+            cleanup_session.close()
+            engine.dispose()
 
 
 # ---------------------------------------------------------------------------
@@ -4683,6 +4814,93 @@ def test_activate_suspended_user_service_preserves_role(
 
     assert target_moderator.is_active is True
     assert target_moderator.role == UserRole.MODERATOR
+
+
+def test_activate_suspended_user_service_rejects_already_active_user(
+    db: Session,
+):
+    """
+    An already-active account cannot be activated again.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4251,
+        username="alreadyactiveadmin",
+        email="alreadyactiveadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4252,
+        username="alreadyactiveuser",
+        email="alreadyactiveuser@example.com",
+    )
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+
+    with pytest.raises(
+        ValueError,
+        match="already active",
+    ):
+        activate_suspended_user(
+            db,
+            target_user,
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+
+
+def test_activate_suspended_user_service_rejects_inactive_user_without_suspension_metadata(
+    db: Session,
+):
+    """
+    An inactive account without suspension metadata cannot be treated as
+    a suspended account and activated through the suspension workflow.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4261,
+        username="inactivewithoutsuspensionadmin",
+        email="inactivewithoutsuspensionadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4262,
+        username="inactivewithoutsuspension",
+        email="inactivewithoutsuspension@example.com",
+    )
+
+    target_user.is_active = False
+    target_user.deactivated_at = None
+    target_user.deactivated_until = None
+    target_user.deactivation_reason = None
+    db.flush()
+
+    with pytest.raises(
+        ValueError,
+        match="not currently suspended",
+    ):
+        activate_suspended_user(
+            db,
+            target_user,
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
 
 def test_reactivate_expired_suspended_users_service_reactivates_expired_account(
     db: Session,

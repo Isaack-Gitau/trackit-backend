@@ -31,6 +31,7 @@ Transaction policy:
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from app.core.constants import UserRole
@@ -55,8 +56,9 @@ from app.repositories.users import (
     revoke_moderator,
     update_user_profile,
 )
-from app.services.tokens import invalidate_all_user_tokens
 from app.schemas.profile import PublicProfileResponse
+from app.services.tokens import invalidate_all_user_tokens
+
 
 # ============================================================================
 # PROFILE UPDATE FIELDS
@@ -100,6 +102,82 @@ PROFILE_NULLABLE_FIELDS = {
 
 MIN_SUSPENSION_HOURS = 1
 MAX_SUSPENSION_HOURS = 24 * 90
+
+
+# ============================================================================
+# SECURITY CONCURRENCY
+# ============================================================================
+
+
+# PostgreSQL transaction-level advisory lock used to serialize operations
+# that can reduce the number of administrators while preserving the
+# last-administrator invariant.
+#
+# This is intentionally a single, dedicated application-level lock key.
+# pg_advisory_xact_lock() automatically releases the lock when the current
+# transaction commits or rolls back.
+ADMIN_INVARIANT_LOCK_KEY = 7_314_159
+
+
+def _acquire_admin_invariant_lock(
+    db: Session,
+) -> None:
+    """
+    Acquire the transaction-level PostgreSQL lock protecting
+    administrator-count invariants.
+
+    The lock is held until the surrounding database transaction
+    commits or rolls back.
+
+    This prevents concurrent administrator demotions and administrator
+    suspensions from both observing the same administrator count and
+    subsequently leaving the system without a protected administrator.
+
+    The application uses PostgreSQL as its production database, so this
+    PostgreSQL-specific coordination primitive is intentional.
+    """
+
+    db.execute(
+        text(
+            "SELECT pg_advisory_xact_lock(:lock_key)"
+        ),
+        {
+            "lock_key": ADMIN_INVARIANT_LOCK_KEY,
+        },
+    )
+
+
+def _invalidate_role_change_authentication(
+    db: Session,
+    user: User,
+) -> None:
+    """
+    Invalidate authentication state after a role change.
+
+    Role changes are security-sensitive because an existing JWT may
+    contain the user's previous role. Incrementing token_version makes
+    previously issued JWTs fail the normal current-user authentication
+    check.
+
+    Stored authentication tokens are also invalidated.
+
+    The operation is intentionally not committed here. The caller's
+    transaction controls commit/rollback.
+    """
+
+    user.token_version += 1
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+
+    invalidate_all_user_tokens(
+        db,
+        user_id=user.id,
+    )
+
+    db.flush()
 
 
 # ============================================================================
@@ -595,6 +673,7 @@ def update_user_privacy_service(
         for field in default_privacy
     }
 
+
 def get_public_user_profile_service(
     db: Session,
     user_id: int,
@@ -685,6 +764,8 @@ def get_public_user_profile_service(
             else {}
         ),
     )
+
+
 # ============================================================================
 # ACCOUNT VERIFICATION
 # ============================================================================
@@ -871,6 +952,11 @@ def suspend_user(
     )
 
     if target_role == UserRole.ADMIN:
+        # The lock must be acquired before counting active administrators.
+        # Otherwise two concurrent suspension requests could both observe
+        # the same count and both suspend an administrator.
+        _acquire_admin_invariant_lock(db)
+
         active_admin_count = count_active_users_by_role(
             db,
             UserRole.ADMIN,
@@ -940,6 +1026,15 @@ def activate_suspended_user(
     - manual administrator activation;
     - automatic scheduled reactivation.
 
+    The target must currently represent a valid temporary suspension:
+
+    - is_active must be False;
+    - deactivated_at must be present;
+    - deactivated_until must be present.
+
+    This prevents unrelated inactive accounts from being incorrectly
+    treated as suspended accounts.
+
     The user's existing role is preserved.
 
     Suspension metadata is cleared.
@@ -949,6 +1044,19 @@ def activate_suspended_user(
 
     The transaction is intentionally not committed here.
     """
+
+    if user.is_active:
+        raise ValueError(
+            "User account is already active."
+        )
+
+    if (
+        user.deactivated_at is None
+        or user.deactivated_until is None
+    ):
+        raise ValueError(
+            "User account is not currently suspended."
+        )
 
     now = datetime.now(
         timezone.utc
@@ -996,6 +1104,9 @@ def promote_user_to_moderator_service(
     - A user who is already a moderator cannot be promoted again.
     - An administrator cannot be promoted to moderator.
     - Only a regular user account may enter the moderator role.
+    - Existing authentication sessions are invalidated after the role
+      change.
+    - Stored authentication tokens are invalidated after the role change.
     - The operation is flushed but not committed.
     - The caller controls transaction commit/rollback.
 
@@ -1032,10 +1143,17 @@ def promote_user_to_moderator_service(
             "Only regular users can be promoted to moderator."
         )
 
-    return promote_user_to_moderator(
+    promoted_user = promote_user_to_moderator(
         db,
         target_user,
     )
+
+    _invalidate_role_change_authentication(
+        db,
+        promoted_user,
+    )
+
+    return promoted_user
 
 
 # -----------------------------------------------------------------------------
@@ -1057,6 +1175,9 @@ def promote_moderator_to_admin_service(
     - An administrator cannot promote themselves.
     - An account that is already an administrator cannot be promoted again.
     - Only an existing moderator may be promoted to administrator.
+    - Existing authentication sessions are invalidated after the role
+      change.
+    - Stored authentication tokens are invalidated after the role change.
     - The operation is flushed but not committed.
     - The caller controls transaction commit/rollback.
 
@@ -1088,10 +1209,17 @@ def promote_moderator_to_admin_service(
             "Only moderators can be promoted to administrator."
         )
 
-    return promote_moderator_to_admin(
+    promoted_user = promote_moderator_to_admin(
         db,
         target_user,
     )
+
+    _invalidate_role_change_authentication(
+        db,
+        promoted_user,
+    )
+
+    return promoted_user
 
 
 # -----------------------------------------------------------------------------
@@ -1113,6 +1241,11 @@ def demote_admin_to_moderator_service(
     - An administrator cannot demote themselves.
     - The final remaining administrator cannot be demoted.
     - Only an existing administrator may be demoted through this workflow.
+    - The administrator-count check is serialized using a PostgreSQL
+      transaction-level advisory lock.
+    - Existing authentication sessions are invalidated after the role
+      change.
+    - Stored authentication tokens are invalidated after the role change.
     - The operation is flushed but not committed.
     - The caller controls transaction commit/rollback.
 
@@ -1139,6 +1272,10 @@ def demote_admin_to_moderator_service(
             "User is not an administrator."
         )
 
+    # Acquire the lock before counting administrators so concurrent
+    # demotions cannot both observe the same administrator count.
+    _acquire_admin_invariant_lock(db)
+
     admin_count = count_users_by_role(
         db,
         UserRole.ADMIN,
@@ -1149,10 +1286,17 @@ def demote_admin_to_moderator_service(
             "The last administrator cannot be demoted."
         )
 
-    return demote_admin_to_moderator(
+    demoted_user = demote_admin_to_moderator(
         db,
         target_user,
     )
+
+    _invalidate_role_change_authentication(
+        db,
+        demoted_user,
+    )
+
+    return demoted_user
 
 
 # -----------------------------------------------------------------------------
@@ -1176,6 +1320,9 @@ def revoke_moderator_service(
     - An administrator cannot demote themselves.
     - Administrators cannot be directly revoked to regular users.
     - Only an existing moderator may be revoked through this workflow.
+    - Existing authentication sessions are invalidated after the role
+      change.
+    - Stored authentication tokens are invalidated after the role change.
     - The operation is flushed but not committed.
     - The caller controls transaction commit/rollback.
 
@@ -1207,10 +1354,17 @@ def revoke_moderator_service(
             "User is not a moderator."
         )
 
-    return revoke_moderator(
+    revoked_user = revoke_moderator(
         db,
         target_user,
     )
+
+    _invalidate_role_change_authentication(
+        db,
+        revoked_user,
+    )
+
+    return revoked_user
 
 
 # ============================================================================
@@ -1315,6 +1469,7 @@ def invalidate_user_sessions(
     db.flush()
 
     return user
+
 
 # ============================================================================
 # AUTOMATIC SUSPENSION EXPIRATION
