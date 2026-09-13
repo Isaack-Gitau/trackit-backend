@@ -23,6 +23,7 @@ from sqlalchemy import (
     String,
     Text,
     func,
+    text,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -162,7 +163,7 @@ class Claim(Base):
         foreign_keys=[reviewed_by],
         back_populates="reviewed_claims",
     )
-    
+
     # ========================================================================
     # Database Indexes
     # ========================================================================
@@ -177,5 +178,22 @@ class Claim(Base):
             "ix_claims_claimant_status",
             "claimant_id",
             "status",
+        ),
+        Index(
+            "uq_claims_active_claimant_item",
+            "claimant_id",
+            "item_id",
+            unique=True,
+            postgresql_where=text(
+                "status IN ('pending', 'approved')"
+            ),
+        ),
+        Index(
+            "uq_claims_approved_item",
+            "item_id",
+            unique=True,
+            postgresql_where=text(
+                "status = 'approved'"
+            ),
         ),
     )

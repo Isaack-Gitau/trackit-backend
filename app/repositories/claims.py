@@ -32,7 +32,7 @@ def create_claim(
     Create and persist a new claim.
 
     The repository does not decide whether the claimant is
-    allowed to claim the item. That belongs to the service layer.
+    allowed to claim the item. That belongs in the service layer.
     """
 
     claim = Claim(
@@ -63,6 +63,25 @@ def get_claim_by_id(
 
     return db.scalar(
         select(Claim).where(Claim.id == claim_id)
+    )
+
+
+def get_claim_by_id_for_update(
+    db: Session,
+    claim_id: int,
+) -> Claim | None:
+    """
+    Retrieve a claim by primary key and lock its row for update.
+
+    The lock is held until the current database transaction commits
+    or rolls back. This is intended for claim lifecycle operations
+    that must serialize concurrent state changes to the same claim.
+    """
+
+    return db.scalar(
+        select(Claim)
+        .where(Claim.id == claim_id)
+        .with_for_update()
     )
 
 

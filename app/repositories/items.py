@@ -86,6 +86,26 @@ def get_item_by_id(
     )
 
 
+def get_item_by_id_for_update(
+    db: Session,
+    item_id: int,
+) -> Item | None:
+    """
+    Retrieve an item by primary key and lock its row for update.
+
+    The lock is held until the current database transaction commits
+    or rolls back. This is intended for operations that must serialize
+    state changes involving a specific item.
+    """
+
+    return db.scalar(
+        select(Item)
+        .where(
+            Item.id == item_id,
+        )
+        .with_for_update()
+    )
+
 # ============================================================================
 # READ — USER ITEMS
 # ============================================================================

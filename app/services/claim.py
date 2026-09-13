@@ -41,6 +41,7 @@ from app.repositories.claims import (
     create_claim as repository_create_claim,
     get_active_claim_by_user_and_item,
     get_claim_by_id,
+    get_claim_by_id_for_update,
     get_claims_by_item,
     get_claims_by_user,
     get_pending_claims,
@@ -49,6 +50,7 @@ from app.repositories.claims import (
 )
 
 from app.repositories.items import (
+    get_item_by_id_for_update,
     update_item_status as repository_update_item_status,
 )
 
@@ -113,6 +115,18 @@ def create_claim(
     The claimant ID must come from the authenticated user.
     """
 
+    locked_item = get_item_by_id_for_update(
+        db,
+        item.id,
+    )
+
+    if locked_item is None:
+        raise ValueError(
+            "The item no longer exists."
+        )
+
+    item = locked_item
+
     if item.type != "found":
         raise ValueError(
             "Claims can only be submitted for found items."
@@ -176,8 +190,6 @@ def create_claim(
         ),
         entity_type="claim",
         entity_id=claim.id,
-        
-
     )
 
     return claim
@@ -351,12 +363,44 @@ def approve_claim(
     - Once a claim is approved, the associated item becomes claimed.
     - The claimant receives a notification.
     - The caller is responsible for administrator authorization.
+
+    Concurrency protection:
+
+    - The claim row is locked first.
+    - The claim status is re-checked after acquiring the lock.
+    - The associated item row is locked second.
+    - This serializes concurrent approval attempts for the same claim
+      and competing approval attempts for the same item.
     """
+
+    locked_claim = get_claim_by_id_for_update(
+        db,
+        claim.id,
+    )
+
+    if locked_claim is None:
+        raise ValueError(
+            "The claim no longer exists."
+        )
+
+    claim = locked_claim
 
     if claim.status != CLAIM_STATUS_PENDING:
         raise ValueError(
             "Only pending claims can be approved."
         )
+
+    locked_item = get_item_by_id_for_update(
+        db,
+        claim.item_id,
+    )
+
+    if locked_item is None:
+        raise ValueError(
+            "The item associated with this claim no longer exists."
+        )
+
+    claim.item = locked_item
 
     # Prevent multiple approved claims for the same item.
     item_claims = get_claims_by_item(
