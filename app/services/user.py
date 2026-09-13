@@ -56,7 +56,7 @@ from app.repositories.users import (
     update_user_profile,
 )
 from app.services.tokens import invalidate_all_user_tokens
-
+from app.schemas.profile import PublicProfileResponse
 
 # ============================================================================
 # PROFILE UPDATE FIELDS
@@ -497,6 +497,194 @@ def update_user_profile_service(
     return user
 
 
+def update_user_privacy_service(
+    db: Session,
+    user: User,
+    changes: Mapping[str, bool | None],
+) -> dict[str, bool]:
+    """
+    Update the authenticated user's public-profile privacy settings.
+
+    Privacy settings are stored inside the existing ``preferences`` JSON
+    object under the ``privacy`` key.
+
+    PATCH semantics:
+
+    - Omitted fields remain unchanged.
+    - True makes the corresponding profile field public.
+    - False keeps the corresponding profile field private.
+    - Existing unrelated preference keys are preserved.
+
+    The transaction is flushed but NOT committed.
+
+    The request-level database dependency controls commit
+    and rollback behavior.
+    """
+
+    allowed_fields = {
+        "profile_picture",
+        "bio",
+        "first_name",
+        "last_name",
+        "email",
+        "phone_number",
+        "social_links",
+    }
+
+    changes = dict(changes)
+
+    unknown_fields = set(changes) - allowed_fields
+
+    if unknown_fields:
+        raise ValueError(
+            "Unsupported privacy fields: "
+            + ", ".join(sorted(unknown_fields))
+        )
+
+    for field, value in changes.items():
+        if value is not None and not isinstance(value, bool):
+            raise ValueError(
+                f"{field} privacy setting must be true or false."
+            )
+
+    existing_preferences = user.preferences
+
+    if not isinstance(existing_preferences, dict):
+        existing_preferences = {}
+
+    preferences = dict(existing_preferences)
+
+    existing_privacy = preferences.get("privacy")
+
+    if not isinstance(existing_privacy, dict):
+        existing_privacy = {}
+
+    privacy = dict(existing_privacy)
+
+    default_privacy = {
+        "profile_picture": True,
+        "bio": True,
+        "first_name": False,
+        "last_name": False,
+        "email": False,
+        "phone_number": False,
+        "social_links": False,
+    }
+
+    for field, default in default_privacy.items():
+        value = privacy.get(field)
+
+        if not isinstance(value, bool):
+            privacy[field] = default
+
+    for field, value in changes.items():
+        if value is not None:
+            privacy[field] = value
+
+    preferences["privacy"] = privacy
+
+    user.preferences = preferences
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return {
+        field: bool(privacy[field])
+        for field in default_privacy
+    }
+
+def get_public_user_profile_service(
+    db: Session,
+    user_id: int,
+) -> PublicProfileResponse | None:
+    """
+    Retrieve the public profile of an active user.
+
+    Inactive users are treated the same as nonexistent users and
+    therefore return None.
+
+    Only explicitly permitted public-profile fields are returned.
+    Sensitive account, security, administrative, address, and
+    preference data is never exposed.
+    """
+
+    user = get_user_by_id(
+        db,
+        user_id,
+    )
+
+    if user is None or not user.is_active:
+        return None
+
+    default_privacy = {
+        "profile_picture": True,
+        "bio": True,
+        "first_name": False,
+        "last_name": False,
+        "email": False,
+        "phone_number": False,
+        "social_links": False,
+    }
+
+    preferences = user.preferences
+
+    if not isinstance(preferences, dict):
+        preferences = {}
+
+    stored_privacy = preferences.get("privacy")
+
+    if not isinstance(stored_privacy, dict):
+        stored_privacy = {}
+
+    privacy = dict(default_privacy)
+
+    for field in default_privacy:
+        value = stored_privacy.get(field)
+
+        if isinstance(value, bool):
+            privacy[field] = value
+
+    return PublicProfileResponse(
+        id=user.id,
+        username=user.username,
+        profile_picture=(
+            user.profile_picture
+            if privacy["profile_picture"]
+            else None
+        ),
+        bio=(
+            user.bio
+            if privacy["bio"]
+            else None
+        ),
+        first_name=(
+            user.first_name
+            if privacy["first_name"]
+            else None
+        ),
+        last_name=(
+            user.last_name
+            if privacy["last_name"]
+            else None
+        ),
+        email=(
+            user.email
+            if privacy["email"]
+            else None
+        ),
+        phone_number=(
+            user.phone_number
+            if privacy["phone_number"]
+            else None
+        ),
+        social_links=(
+            dict(user.social_links)
+            if privacy["social_links"]
+            else {}
+        ),
+    )
 # ============================================================================
 # ACCOUNT VERIFICATION
 # ============================================================================

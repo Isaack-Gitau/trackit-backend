@@ -2,8 +2,8 @@
 TRACKIT Profile Schemas.
 
 Defines request and response models for authenticated
-user profile operations and authorized administrative
-user-profile inspection.
+user profile operations, public user profiles, privacy
+settings, and authorized administrative user inspection.
 
 Profile fields include:
 - username
@@ -16,6 +16,9 @@ Profile fields include:
 - address
 - social links
 - preferences
+
+Public profile fields are controlled by explicit privacy
+settings and never expose arbitrary User model fields.
 
 Administrative account-status fields include:
 - role
@@ -39,6 +42,134 @@ from pydantic import (
     field_validator,
 )
 
+
+# ============================================================================
+# PROFILE PRIVACY
+# ============================================================================
+
+
+class ProfilePrivacyResponse(BaseModel):
+    """
+    Effective privacy settings for a user's public profile.
+
+    These settings control which optional profile fields may
+    be exposed to other authenticated TRACKIT users.
+
+    Username is intentionally excluded because it is always
+    public and is therefore not a user-controlled privacy field.
+    """
+
+    profile_picture: bool = True
+
+    bio: bool = True
+
+    first_name: bool = False
+
+    last_name: bool = False
+
+    email: bool = False
+
+    phone_number: bool = False
+
+    social_links: bool = False
+
+
+# -----------------------------------------------------------------------------
+
+
+class ProfilePrivacyUpdate(BaseModel):
+    """
+    Privacy settings that an authenticated user may update.
+
+    PATCH semantics are used:
+
+    - Omitted field = preserve the existing setting.
+    - True = make the field public.
+    - False = keep the field private.
+
+    Username is intentionally excluded because usernames are
+    always public on TRACKIT.
+    """
+
+    profile_picture: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's profile picture may be shown "
+            "on their public profile."
+        ),
+    )
+
+    bio: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's bio may be shown on their "
+            "public profile."
+        ),
+    )
+
+    first_name: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's first name may be shown on "
+            "their public profile."
+        ),
+    )
+
+    last_name: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's last name may be shown on "
+            "their public profile."
+        ),
+    )
+
+    email: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's email address may be shown "
+            "on their public profile."
+        ),
+    )
+
+    phone_number: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's phone number may be shown "
+            "on their public profile."
+        ),
+    )
+
+    social_links: bool | None = Field(
+        default=None,
+        description=(
+            "Whether the user's social links may be shown "
+            "on their public profile."
+        ),
+    )
+class PublicProfileResponse(BaseModel):
+    """
+    Public profile information visible to other authenticated users.
+
+    Username is always public. Optional profile fields are returned
+    according to the user's privacy settings.
+
+    Sensitive account, security, address, role, status, and preference
+    information is intentionally excluded.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: int
+    username: str
+    profile_picture: str | None = None
+    bio: str | None = None
+    first_name: str | None = None
+    last_name: str | None = None
+    email: str | None = None
+    phone_number: str | None = None
+    social_links: dict[str, object] = Field(
+        default_factory=dict
+    )
 
 # ============================================================================
 # PROFILE RESPONSE

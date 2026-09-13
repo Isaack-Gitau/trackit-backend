@@ -2,14 +2,17 @@
 TRACKIT Profile Router.
 
 Provides authenticated-user profile endpoints,
-account management, user administration, administrative
-role management, account suspension management, and
-administrator-authored email communication.
+public user profiles, privacy settings, account management,
+user administration, administrative role management,
+account suspension management, and administrator-authored
+email communication.
 
 Endpoints:
 
     GET    /api/profile
     PATCH  /api/profile
+    PATCH  /api/profile/privacy
+    GET    /api/profile/users/{user_id}
     DELETE /api/profile/account
 
     POST   /api/profile/admin/email
@@ -24,6 +27,8 @@ Endpoints:
 
 Users may:
 - View their own profile.
+- View active users' public profiles.
+- Control which optional profile fields are publicly visible.
 - Update their username.
 - Update their email.
 - Update their first name.
@@ -75,8 +80,11 @@ from app.schemas.profile import (
     AdminEmailRequest,
     AdminEmailResponse,
     AdminUserDetailResponse,
+    ProfilePrivacyResponse,
+    ProfilePrivacyUpdate,
     ProfileResponse,
     ProfileUpdate,
+    PublicProfileResponse,
     UserSuspensionRequest,
 )
 from app.services.admin_email import send_admin_email_to_users
@@ -88,11 +96,13 @@ from app.services.user import (
     activate_suspended_user,
     delete_user_account_service,
     demote_admin_to_moderator_service,
+    get_public_user_profile_service,
     get_user,
     promote_moderator_to_admin_service,
     promote_user_to_moderator_service,
     revoke_moderator_service,
     suspend_user,
+    update_user_privacy_service,
     update_user_profile_service,
     verify_user_password,
 )
@@ -224,6 +234,111 @@ def update_profile(
     return ProfileResponse.model_validate(
         updated_user
     )
+
+
+# ============================================================================
+# UPDATE CURRENT USER PRIVACY SETTINGS
+# ============================================================================
+
+
+@router.patch(
+    "/privacy",
+    response_model=ProfilePrivacyResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update public profile privacy settings",
+)
+def update_profile_privacy(
+    privacy_data: ProfilePrivacyUpdate,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ProfilePrivacyResponse:
+    """
+    Update the authenticated user's public-profile privacy settings.
+
+    PATCH semantics are used:
+
+    - Omitted fields remain unchanged.
+    - True makes the corresponding profile field public.
+    - False keeps the corresponding profile field private.
+
+    Privacy settings are stored inside the existing user
+    preferences JSON object under the ``privacy`` key.
+
+    Existing unrelated preference keys are preserved.
+    """
+
+    changes = privacy_data.model_dump(
+        exclude_unset=True
+    )
+
+    try:
+        privacy = update_user_privacy_service(
+            db,
+            current_user,
+            changes,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return ProfilePrivacyResponse(
+        **privacy
+    )
+
+
+# ============================================================================
+# GET PUBLIC USER PROFILE
+# ============================================================================
+
+
+@router.get(
+    "/users/{user_id}",
+    response_model=PublicProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get a user's public profile",
+)
+def get_public_user_profile(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> PublicProfileResponse:
+    """
+    Return the public profile of an active TRACKIT user.
+
+    Only authenticated users may access public profiles.
+
+    The target user's privacy settings determine which optional
+    profile fields are returned.
+
+    Username is always public.
+
+    Inactive or nonexistent users are intentionally treated
+    identically and return HTTP 404.
+
+    Sensitive account, administrative, security, address,
+    status, verification, and preference information is never
+    exposed through this endpoint.
+    """
+
+    # The dependency intentionally authenticates the requester.
+    # The requester itself does not otherwise affect visibility.
+    _ = current_user
+
+    public_profile = get_public_user_profile_service(
+        db,
+        user_id,
+    )
+
+    if public_profile is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    return public_profile
 
 
 # ============================================================================
