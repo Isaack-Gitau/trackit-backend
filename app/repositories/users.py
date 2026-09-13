@@ -76,6 +76,43 @@ def get_user_by_id(
 # -----------------------------------------------------------------------------
 
 
+def get_users_by_ids(
+    db: Session,
+    user_ids: list[int],
+) -> list[User]:
+    """
+    Retrieve multiple users by primary key.
+
+    Only database access belongs in this repository.
+    Validation of requested recipients belongs in the service layer.
+
+    Args:
+        db: Active SQLAlchemy session.
+        user_ids: User IDs to retrieve.
+
+    Returns:
+        Users whose IDs exist in the database.
+
+    Notes:
+        The returned list contains only existing users. The service
+        layer is responsible for detecting missing requested IDs.
+    """
+
+    if not user_ids:
+        return []
+
+    result = db.execute(
+        select(User).where(
+            User.id.in_(user_ids)
+        )
+    )
+
+    return list(
+        result.scalars().all()
+    )
+
+#------------------------------------------------------------------------------------
+
 def get_user_by_username(
     db: Session,
     username: str,

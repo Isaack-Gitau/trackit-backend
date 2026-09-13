@@ -50,7 +50,7 @@ Coverage:
 
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3725,6 +3725,631 @@ def test_last_admin_invariant_is_enforced_by_service(
 
     assert admin.role == UserRole.ADMIN
 
+
+# ---------------------------------------------------------------------------
+# Admin custom email API tests
+# ---------------------------------------------------------------------------
+
+
+def test_admin_email_requires_authentication(
+    client: TestClient,
+    db: Session,
+):
+    response = client.post(
+        "/api/profile/admin/email",
+        json={
+            "user_ids": [1001],
+            "subject": "Test subject",
+            "message": "Test message",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_normal_user_cannot_send_admin_email(
+    client: TestClient,
+    db: Session,
+):
+    admin_email = "admin-email-test@example.com"
+
+    user = create_test_user(
+        db,
+        user_id=4701,
+        username="admin-email-multiple-test",
+        email="normal-user-email-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4702,
+        username="recipient-one-email-test",
+        email="recipient-email-test@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin/email",
+        headers=authenticated_headers(user),
+        json={
+            "user_ids": [recipient.id],
+            "subject": "Test subject",
+            "message": "Test message",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_moderator_cannot_send_admin_email(
+    client: TestClient,
+    db: Session,
+):
+    moderator = create_moderator(
+        db,
+        user_id=4703,
+        username="admin-inactive-recipient-test",
+        email="moderator-email-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4704,
+        username="inactive-recipient-test",
+        email="recipient-email-test@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin/email",
+        headers=authenticated_headers(moderator),
+        json={
+            "user_ids": [recipient.id],
+            "subject": "Test subject",
+            "message": "Test message",
+        },
+    )
+
+    assert response.status_code == 403
+
+
+def test_admin_can_send_email_to_multiple_users(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4705,
+        username="admin-nonexistent-recipient-test",
+        email="admin-multiple-email-test@example.com",
+    )
+
+    recipient_one = create_test_user(
+        db,
+        user_id=4706,
+        username="existing-recipient-test",
+        email="recipient-one-email-test@example.com",
+    )
+
+    recipient_two = create_test_user(
+        db,
+        user_id=4707,
+        username="nonexistent-recipient-test",
+        email="recipient-two-email-test@example.com",
+    )
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [
+                    recipient_one.id,
+                    recipient_two.id,
+                ],
+                "subject": "TRACKIT announcement",
+                "message": "This is an administrative message.",
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 2
+    assert data["sent"] == 2
+    assert data["failed"] == 0
+
+    assert data["results"] == [
+        {
+            "user_id": recipient_one.id,
+            "success": True,
+            "error": None,
+        },
+        {
+            "user_id": recipient_two.id,
+            "success": True,
+            "error": None,
+        },
+    ]
+
+    assert mock_send.await_count == 2
+
+    calls = mock_send.await_args_list
+
+    assert calls[0].kwargs["recipient"] == recipient_one.email
+    assert calls[1].kwargs["recipient"] == recipient_two.email
+
+    assert calls[0].kwargs["subject"] == "TRACKIT announcement"
+    assert calls[0].kwargs["message"] == "This is an administrative message."
+
+
+def test_admin_email_allows_inactive_recipient(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4708,
+        username="admin-no-email-test",
+        email="admin-inactive-recipient-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4709,
+        username="no-email-recipient-test",
+        email="inactive-recipient-test@example.com",
+    )
+
+    recipient.is_active = False
+    recipient.deactivated_at = datetime.now(timezone.utc)
+    recipient.deactivated_until = (
+        datetime.now(timezone.utc) + timedelta(hours=24)
+    )
+    recipient.deactivation_reason = "Test suspension"
+
+    db.add(recipient)
+    db.commit()
+    db.refresh(recipient)
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [recipient.id],
+                "subject": "Administrative message",
+                "message": "This message may be sent to inactive users.",
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 1
+    assert data["sent"] == 1
+    assert data["failed"] == 0
+    assert data["results"][0]["user_id"] == recipient.id
+    assert data["results"][0]["success"] is True
+
+    mock_send.assert_awaited_once()
+
+
+def test_admin_email_rejects_nonexistent_recipient_before_sending(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4710,
+        username="admin-delivery-failure-test",
+        email="admin-missing-recipient-test@example.com",
+    )
+
+    existing_recipient = create_test_user(
+        db,
+        user_id=4711,
+        username="failure-recipient-one-test",
+        email="existing-recipient-test@example.com",
+    )
+
+    nonexistent_user_id = 999999
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [
+                    existing_recipient.id,
+                    nonexistent_user_id,
+                ],
+                "subject": "Administrative message",
+                "message": "This should not be delivered.",
+            },
+        )
+
+    assert response.status_code == 400
+
+    data = response.json()
+
+    assert "not found" in data["detail"].lower()
+
+    mock_send.assert_not_awaited()
+
+
+def test_admin_email_rejects_user_without_email_before_sending(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4712,
+        username="admin-audit-test",
+        email="admin-missing-email-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4713,
+        username="audit-recipient-one-test",
+        email="recipient-with-email-test@example.com",
+    )
+
+    recipient.email = ""
+
+    db.add(recipient)
+    db.commit()
+    db.refresh(recipient)
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [recipient.id],
+                "subject": "Administrative message",
+                "message": "This should not be delivered.",
+            },
+        )
+
+    assert response.status_code == 400
+
+    data = response.json()
+
+    assert "email address" in data["detail"].lower()
+
+    mock_send.assert_not_awaited()
+
+
+def test_admin_email_delivery_failure_does_not_stop_other_recipients(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4714,
+        username="admin-response-test",
+        email="admin-delivery-failure-test@example.com",
+    )
+
+    successful_recipient = create_test_user(
+        db,
+        user_id=4715,
+        username="private-recipient-test",
+        email="successful-recipient-test@example.com",
+    )
+
+    failed_recipient = create_test_user(
+        db,
+        user_id=4716,
+        username="private-recipient-two-test",
+        email="failed-recipient-test@example.com",
+    )
+
+    async def send_email_side_effect(
+        *,
+        recipient: str,
+        subject: str,
+        message: str,
+    ) -> None:
+        if recipient == failed_recipient.email:
+            raise RuntimeError("Simulated SMTP failure.")
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+        side_effect=send_email_side_effect,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [
+                    successful_recipient.id,
+                    failed_recipient.id,
+                ],
+                "subject": "Administrative message",
+                "message": "Testing isolated delivery failures.",
+            },
+        )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 2
+    assert data["sent"] == 1
+    assert data["failed"] == 1
+
+    assert data["results"][0] == {
+        "user_id": successful_recipient.id,
+        "success": True,
+        "error": None,
+    }
+
+    assert data["results"][1] == {
+        "user_id": failed_recipient.id,
+        "success": False,
+        "error": "Email delivery failed.",
+    }
+
+    assert mock_send.await_count == 2
+
+
+def test_admin_email_creates_audit_log_for_each_recipient(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4717,
+        username="admin-duplicate-test",
+        email="admin-audit-email-test@example.com",
+    )
+
+    successful_recipient = create_test_user(
+        db,
+        user_id=4718,
+        username="duplicate-recipient-test",
+        email="audit-success-recipient-test@example.com",
+    )
+
+    failed_recipient = create_test_user(
+        db,
+        user_id=4719,
+        username="duplicate-recipient-two-test",
+        email="audit-failed-recipient-test@example.com",
+    )
+
+    async def send_email_side_effect(
+        *,
+        recipient: str,
+        subject: str,
+        message: str,
+    ) -> None:
+        if recipient == failed_recipient.email:
+            raise RuntimeError("Simulated SMTP failure.")
+
+    email_message = "This private message must not appear in the audit log."
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+        side_effect=send_email_side_effect,
+    ):
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [
+                    successful_recipient.id,
+                    failed_recipient.id,
+                ],
+                "subject": "Audit test subject",
+                "message": email_message,
+            },
+        )
+
+    assert response.status_code == 200
+
+    logs = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.user_id == admin.id,
+            AuditLog.action == "admin_action",
+            AuditLog.resource_type == "user",
+        )
+        .order_by(AuditLog.id.asc())
+        .all()
+    )
+
+    recipient_logs = [
+        log
+        for log in logs
+        if log.resource_id in {
+            successful_recipient.id,
+            failed_recipient.id,
+        }
+    ]
+
+    assert len(recipient_logs) == 2
+
+    for log in recipient_logs:
+        assert log.resource_id in {
+            successful_recipient.id,
+            failed_recipient.id,
+        }
+
+        if log.description is not None:
+            assert email_message not in log.description
+
+
+def test_admin_email_response_does_not_expose_recipient_addresses(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4720,
+        username="admin-response-email-test",
+        email="admin-response-email-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4721,
+        username="Private-recipient-address",
+        email="private-recipient-address@example.com",
+    )
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ):
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [recipient.id],
+                "subject": "Privacy test",
+                "message": "Recipient address must not be returned.",
+            },
+        )
+
+    assert response.status_code == 200
+
+    response_text = response.text
+
+    assert recipient.email not in response_text
+
+    data = response.json()
+
+    assert data["results"][0]["user_id"] == recipient.id
+    assert "email" not in data["results"][0]
+
+
+def test_admin_email_rejects_duplicate_recipient_ids(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4722,
+        username="admin-duplicate-email-test",
+        email="admin-duplicate-email-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4723,
+        username="duplicate-recipient-test",
+        email="duplicate-recipient-test@example.com",
+    )
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [
+                    recipient.id,
+                    recipient.id,
+                ],
+                "subject": "Duplicate test",
+                "message": "This should fail validation.",
+            },
+        )
+
+    assert response.status_code == 422
+    mock_send.assert_not_awaited()
+
+
+def test_admin_email_rejects_empty_subject(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4724,
+        username="admin-empty-subject-test",
+        email="admin-empty-subject-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4725,
+        username="empty-subject-recipient-test",
+        email="empty-subject-recipient-test@example.com",
+    )
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [recipient.id],
+                "subject": "   ",
+                "message": "Valid message.",
+            },
+        )
+
+    assert response.status_code == 422
+    mock_send.assert_not_awaited()
+
+
+def test_admin_email_rejects_empty_message(
+    client: TestClient,
+    db: Session,
+):
+    admin = create_admin(
+        db,
+        user_id=4726,
+        username="admin-empty-subject-test",
+        email="admin-empty-message-test@example.com",
+    )
+
+    recipient = create_test_user(
+        db,
+        user_id=4727,
+        username="empty-subject-recipient-test",
+        email="empty-message-recipient-test@example.com",
+    )
+
+    with patch(
+        "app.services.admin_email.send_admin_custom_email",
+        new_callable=AsyncMock,
+    ) as mock_send:
+        response = client.post(
+            "/api/profile/admin/email",
+            headers=authenticated_headers(admin),
+            json={
+                "user_ids": [recipient.id],
+                "subject": "Valid subject",
+                "message": "   ",
+            },
+        )
+
+    assert response.status_code == 422
+    mock_send.assert_not_awaited()
 
 # ============================================================================
 # ACCOUNT SUSPENSION SERVICE

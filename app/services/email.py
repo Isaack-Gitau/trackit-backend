@@ -5,6 +5,8 @@ Handles transactional emails for:
 
 - Email verification
 - Password reset
+- Account reactivation
+- Administrator custom messages
 
 Uses SMTP through aiosmtplib.
 
@@ -15,6 +17,8 @@ Security principles:
 - SMTP credentials come exclusively from application settings.
 - Credentials and tokens are never logged by this service.
 - Both HTML and plain-text email versions are provided.
+- Administrator message content is HTML-escaped before being
+  inserted into HTML email bodies.
 """
 
 from __future__ import annotations
@@ -451,6 +455,7 @@ Your password will remain unchanged.
         text_body=text_body,
     )
 
+
 # ============================================================================
 # ACCOUNT REACTIVATION
 # ============================================================================
@@ -627,6 +632,155 @@ please contact TRACKIT support.
     await _send_email(
         recipient=recipient,
         subject="Your TRACKIT account has been reactivated",
+        html_body=html_body,
+        text_body=text_body,
+    )
+
+
+# ============================================================================
+# ADMIN CUSTOM EMAIL
+# ============================================================================
+
+
+async def send_admin_custom_email(
+    *,
+    recipient: str,
+    subject: str,
+    message: str,
+) -> None:
+    """
+    Send a custom administrator-authored email to one recipient.
+
+    The recipient is supplied by the caller after resolving a
+    registered TRACKIT user from the database.
+
+    The message is treated as plain text. It is HTML-escaped
+    before being placed into the HTML email body so that
+    administrator-authored content cannot inject arbitrary HTML.
+
+    Raises:
+        ValueError:
+            When the recipient, subject, or message is invalid.
+
+        Exception:
+            When SMTP connection, authentication, or delivery fails.
+    """
+
+    if not recipient or not recipient.strip():
+        raise ValueError(
+            "Recipient email cannot be empty."
+        )
+
+    if not subject or not subject.strip():
+        raise ValueError(
+            "Email subject cannot be empty."
+        )
+
+    if "\r" in subject or "\n" in subject:
+        raise ValueError(
+            "Email subject cannot contain newline characters."
+        )
+
+    if not message or not message.strip():
+        raise ValueError(
+            "Email message cannot be empty."
+        )
+
+    normalized_recipient = recipient.strip()
+    normalized_subject = subject.strip()
+    normalized_message = message.strip()
+
+    safe_subject = escape(
+        normalized_subject
+    )
+
+    safe_message = escape(
+        normalized_message
+    ).replace(
+        "\r\n",
+        "<br>",
+    ).replace(
+        "\n",
+        "<br>",
+    ).replace(
+        "\r",
+        "<br>",
+    )
+
+    html_body = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{safe_subject}</title>
+</head>
+
+<body style="
+    margin:0;
+    padding:0;
+    background:#f8fafc;
+    font-family:Arial,Helvetica,sans-serif;
+    color:#0f172a;
+">
+
+    <div style="
+        max-width:600px;
+        margin:40px auto;
+        background:#ffffff;
+        border-radius:12px;
+        padding:40px;
+        box-shadow:0 4px 20px rgba(15,23,42,0.08);
+    ">
+
+        <h1 style="
+            margin-top:0;
+            color:#4f46e5;
+            font-size:28px;
+        ">
+            {safe_subject}
+        </h1>
+
+        <div style="
+            font-size:16px;
+            line-height:1.7;
+            color:#0f172a;
+        ">
+            {safe_message}
+        </div>
+
+        <hr style="
+            border:none;
+            border-top:1px solid #e2e8f0;
+            margin:30px 0;
+        ">
+
+        <p style="
+            font-size:14px;
+            color:#475569;
+        ">
+            — TRACKIT Administration
+        </p>
+
+    </div>
+
+</body>
+</html>
+"""
+
+    text_body = f"""
+TRACKIT Administration
+
+{normalized_subject}
+
+{normalized_message}
+
+— TRACKIT Administration
+"""
+
+    await _send_email(
+        recipient=normalized_recipient,
+        subject=normalized_subject,
         html_body=html_body,
         text_body=text_body,
     )

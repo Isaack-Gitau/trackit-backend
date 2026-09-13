@@ -23,8 +23,11 @@ Administrative account-status fields include:
 - suspension timestamps
 - suspension reason
 
-Authentication and authorization secrets are deliberately
-excluded from all profile responses.
+Administrative email fields include:
+- selected recipient user IDs
+- email subject
+- email message
+- delivery results
 """
 
 from datetime import datetime
@@ -234,6 +237,172 @@ class UserSuspensionRequest(BaseModel):
             return None
 
         return value
+
+
+# ============================================================================
+# ADMIN CUSTOM EMAIL REQUEST
+# ============================================================================
+
+
+class AdminEmailRequest(BaseModel):
+    """
+    Request body used by administrators to send a custom
+    email to selected TRACKIT users.
+
+    Recipients are identified by user ID rather than by
+    arbitrary email addresses. The service resolves the
+    registered email address from the database.
+
+    A maximum of 50 recipients is allowed per request.
+
+    The admin may include their own account as a recipient.
+
+    Inactive or suspended users are also valid recipients
+    because administrative email is separate from account
+    authentication and access.
+    """
+
+    user_ids: list[int] = Field(
+        ...,
+        min_length=1,
+        max_length=50,
+        description=(
+            "IDs of the TRACKIT users who should receive the email. "
+            "Maximum: 50 recipients."
+        ),
+    )
+
+    subject: str = Field(
+        ...,
+        min_length=1,
+        max_length=200,
+        description="Email subject.",
+    )
+
+    message: str = Field(
+        ...,
+        min_length=1,
+        max_length=10000,
+        description="Email message body.",
+    )
+
+    @field_validator("user_ids")
+    @classmethod
+    def validate_user_ids(
+        cls,
+        value: list[int],
+    ) -> list[int]:
+        """
+        Validate recipient IDs.
+
+        Recipient IDs must be positive integers and must not
+        contain duplicates.
+        """
+
+        if any(user_id <= 0 for user_id in value):
+            raise ValueError(
+                "User IDs must be positive integers."
+            )
+
+        if len(value) != len(set(value)):
+            raise ValueError(
+                "Duplicate user IDs are not allowed."
+            )
+
+        return value
+
+    # ------------------------------------------------------------------------
+
+    @field_validator("subject")
+    @classmethod
+    def normalize_subject(
+        cls,
+        value: str,
+    ) -> str:
+        """
+        Normalize the email subject.
+
+        Leading and trailing whitespace is removed and an
+        empty subject is rejected.
+        """
+
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "Email subject cannot be empty."
+            )
+
+        return value
+
+    # ------------------------------------------------------------------------
+
+    @field_validator("message")
+    @classmethod
+    def normalize_message(
+        cls,
+        value: str,
+    ) -> str:
+        """
+        Normalize the email message.
+
+        Leading and trailing whitespace is removed and an
+        empty message is rejected.
+        """
+
+        value = value.strip()
+
+        if not value:
+            raise ValueError(
+                "Email message cannot be empty."
+            )
+
+        return value
+
+
+# ============================================================================
+# ADMIN CUSTOM EMAIL DELIVERY RESULT
+# ============================================================================
+
+
+class AdminEmailDeliveryResult(BaseModel):
+    """
+    Delivery result for one administrator-email recipient.
+
+    The recipient's email address is deliberately excluded
+    from the response because the user ID is sufficient for
+    identifying the requested recipient and avoids returning
+    unnecessary personal data.
+    """
+
+    user_id: int
+
+    success: bool
+
+    error: str | None = None
+
+
+# ============================================================================
+# ADMIN CUSTOM EMAIL RESPONSE
+# ============================================================================
+
+
+class AdminEmailResponse(BaseModel):
+    """
+    Summary of an administrator custom-email operation.
+
+    A valid request may contain a mixture of successful and
+    failed deliveries because each recipient is handled
+    independently.
+    """
+
+    total: int
+
+    sent: int
+
+    failed: int
+
+    results: list[AdminEmailDeliveryResult]
 
 
 # ============================================================================

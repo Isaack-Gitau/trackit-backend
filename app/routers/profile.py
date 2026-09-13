@@ -3,13 +3,16 @@ TRACKIT Profile Router.
 
 Provides authenticated-user profile endpoints,
 account management, user administration, administrative
-role management, and account suspension management.
+role management, account suspension management, and
+administrator-authored email communication.
 
 Endpoints:
 
     GET    /api/profile
     PATCH  /api/profile
     DELETE /api/profile/account
+
+    POST   /api/profile/admin/email
 
     GET    /api/profile/admin/{user_id}
     POST   /api/profile/admin/{user_id}/promote
@@ -44,6 +47,7 @@ Administrators may:
 - Revoke moderator privileges.
 - Temporarily suspend active user accounts.
 - Manually reactivate suspended user accounts.
+- Send custom administrative emails to selected users.
 
 Administrative responses deliberately exclude
 authentication and security secrets.
@@ -67,11 +71,15 @@ from app.api.deps import (
 from app.db.dependencies import get_db
 from app.models.user import User
 from app.schemas.profile import (
+    AdminEmailDeliveryResult,
+    AdminEmailRequest,
+    AdminEmailResponse,
     AdminUserDetailResponse,
     ProfileResponse,
     ProfileUpdate,
     UserSuspensionRequest,
 )
+from app.services.admin_email import send_admin_email_to_users
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
@@ -233,7 +241,10 @@ def delete_account(
         ...,
         embed=True,
         min_length=1,
-        description="Current account password required to permanently delete the account.",
+        description=(
+            "Current account password required to permanently "
+            "delete the account."
+        ),
     ),
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_user),
@@ -306,6 +317,128 @@ def delete_account(
             )
 
     return None
+
+
+# ============================================================================
+# ADMIN ONLY: SEND CUSTOM EMAIL
+# ============================================================================
+
+
+@router.post(
+    "/admin/email",
+    response_model=AdminEmailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Send a custom administrative email",
+)
+async def send_admin_email(
+    email_data: AdminEmailRequest,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminEmailResponse:
+    """
+    Send a custom administrative email to selected TRACKIT users.
+
+    Only authenticated administrators may perform this action.
+
+    Recipients are identified by TRACKIT user IDs. Their registered
+    email addresses are resolved by the service layer.
+
+    Security and delivery rules:
+
+    - Arbitrary email addresses are not accepted.
+    - Every requested user must exist before any email is sent.
+    - Users without registered email addresses are rejected before
+      delivery begins.
+    - Inactive or suspended users may receive administrative email.
+    - The administrator may include their own account.
+    - Each recipient receives an individual email.
+    - Recipients cannot see the email addresses of other recipients.
+    - SMTP failure for one recipient does not stop delivery to
+      remaining recipients.
+    - Email message content is never stored in audit logs.
+    - SMTP exception details are not exposed through the API.
+
+    Delivery failures are returned as per-recipient results rather
+    than causing successful deliveries to be rolled back. SMTP is an
+    external system and therefore cannot participate in the database
+    transaction.
+
+    Raises:
+        HTTPException:
+            400 when recipient validation fails.
+    """
+
+    try:
+        delivery_results = await send_admin_email_to_users(
+            db,
+            user_ids=email_data.user_ids,
+            subject=email_data.subject,
+            message=email_data.message,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    response_results: list[AdminEmailDeliveryResult] = []
+
+    for result in delivery_results:
+        response_result = AdminEmailDeliveryResult(
+            user_id=result.user_id,
+            success=result.success,
+            error=result.error,
+        )
+
+        response_results.append(
+            response_result
+        )
+
+        if result.success:
+            create_audit_log(
+                db,
+                event_type=AUDIT_ADMIN_ACTION,
+                success=True,
+                description=(
+                    f"Administrator {current_admin.id} "
+                    f"sent a custom administrative email "
+                    f"to user {result.user_id}."
+                ),
+                user_id=current_admin.id,
+                resource_type="user",
+                resource_id=result.user_id,
+            )
+
+        else:
+            create_audit_log(
+                db,
+                event_type=AUDIT_ADMIN_ACTION,
+                success=False,
+                description=(
+                    f"Administrator {current_admin.id} "
+                    f"attempted to send a custom administrative "
+                    f"email to user {result.user_id}, but delivery failed."
+                ),
+                user_id=current_admin.id,
+                resource_type="user",
+                resource_id=result.user_id,
+            )
+
+    sent_count = sum(
+        1
+        for result in delivery_results
+        if result.success
+    )
+
+    failed_count = len(delivery_results) - sent_count
+
+    return AdminEmailResponse(
+        total=len(delivery_results),
+        sent=sent_count,
+        failed=failed_count,
+        results=response_results,
+    )
 
 
 # ============================================================================
