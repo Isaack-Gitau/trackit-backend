@@ -158,7 +158,7 @@ def test_cors_allows_configured_frontend_origin(
     response = client.options(
         "/api/health",
         headers={
-            "Origin": "http://localhost:5500",
+            "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "GET",
         },
     )
@@ -167,7 +167,7 @@ def test_cors_allows_configured_frontend_origin(
 
     assert (
         response.headers["access-control-allow-origin"]
-        == "http://localhost:5500"
+        == "http://localhost:5173"
     )
 
     assert (
@@ -211,7 +211,7 @@ def test_cors_allows_authorization_header(
     response = client.options(
         "/api/auth/me",
         headers={
-            "Origin": "http://localhost:5500",
+            "Origin": "http://localhost:5173",
             "Access-Control-Request-Method": "GET",
             "Access-Control-Request-Headers": "authorization",
         },
@@ -247,7 +247,7 @@ def test_rate_limit_response_exposes_retry_after_header(
     then verifies the actual HTTP 429 response.
     """
 
-    origin = "http://localhost:5500"
+    origin = "http://localhost:5173"
 
     login_payload = {
         "identifier": "middleware-test@example.com",

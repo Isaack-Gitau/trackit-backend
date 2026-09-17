@@ -17,6 +17,7 @@ Security principles:
 
 - Strict input validation
 - Normalized usernames and emails
+- Validated personal names
 - Sensitive authentication values are accepted through
   validated request bodies rather than URL query parameters
 - Passwords are never returned
@@ -111,7 +112,16 @@ class UserRegisterRequest(BaseModel):
     @classmethod
     def validate_names(cls, value: str) -> str:
         """
-        Normalize personal names.
+        Normalize and validate personal names.
+
+        Rules:
+
+        - Leading and trailing whitespace is removed.
+        - Repeated whitespace is normalized to a single space.
+        - Names may contain letters, spaces, hyphens, and apostrophes.
+        - Numbers are not allowed.
+        - Underscores and other punctuation are not allowed.
+        - The name must contain at least one letter.
         """
 
         value = " ".join(
@@ -122,6 +132,24 @@ class UserRegisterRequest(BaseModel):
             raise ValueError(
                 "Name is required."
             )
+
+        if not any(
+            character.isalpha()
+            for character in value
+        ):
+            raise ValueError(
+                "Name must contain at least one letter."
+            )
+
+        for character in value:
+            if (
+                not character.isalpha()
+                and character not in " -'"
+            ):
+                raise ValueError(
+                    "Name may contain only letters, "
+                    "spaces, hyphens, and apostrophes."
+                )
 
         return value
 

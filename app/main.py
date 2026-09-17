@@ -33,6 +33,7 @@ Router architecture:
 """
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.middleware.security import configure_security_middleware
@@ -65,6 +66,22 @@ app = FastAPI(
 # ============================================================================
 
 configure_security_middleware(app)
+
+
+# ============================================================================
+# MEDIA FILES
+# ============================================================================
+
+# Uploaded item images and profile pictures are stored beneath the
+# configured media root. The image utility is responsible for validating
+# and sanitizing uploaded files before they reach this directory.
+app.mount(
+    settings.MEDIA_URL.rstrip("/"),
+    StaticFiles(
+        directory=settings.MEDIA_ROOT,
+    ),
+    name="media",
+)
 
 
 # ============================================================================

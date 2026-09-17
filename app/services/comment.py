@@ -1,44 +1,24 @@
 """
 TRACKIT Comment Service.
 
-Business logic for creating, retrieving, updating, and deleting
-comments attached to publicly visible item posts.
-
-Architecture:
-
-    Router
-        ↓
-    Authentication / Authorization
-        ↓
-    Comment Service
-        ↓
-    Comment Repository
-        ↓
-    Comment Model
-        ↓
-    PostgreSQL
+Business logic for comments attached to publicly visible items.
 
 Security principles:
-
-- Comment ownership is determined from the persisted Comment.user_id.
-- Clients cannot choose or change comment ownership.
-- Only verified users may create comments.
-- Comments may only be created on publicly visible items.
-- Only the comment owner may edit or delete their own comment.
-- Positive integer IDs are required.
+- Comment authorship is derived from the authenticated user.
+- Comment item ownership/visibility is derived from the route and database.
+- Only verified users may create, edit, or delete comments.
+- Public comments expose only safe author identity information.
+- Author profile-picture visibility follows the user's public-profile
+  privacy settings.
 - Comment content is treated as untrusted plain text.
-- Whitespace-only comments are rejected.
-- Content length is enforced before persistence.
-- Authorization is enforced in the service layer rather than relying
-  solely on router-level checks.
-- Security-relevant mutations are auditable.
-- Database persistence is delegated to the repository layer.
+- Comment actions are audit logged.
 """
 
 from sqlalchemy.orm import Session
 
 from app.models.comment import Comment
 from app.models.item import Item
+from app.models.user import User
 
 from app.repositories.comments import (
     create_comment as repository_create_comment,
@@ -73,24 +53,31 @@ PUBLIC_ITEM_STATUSES = {
 }
 
 
+DEFAULT_PUBLIC_PROFILE_PRIVACY = {
+    "profile_picture": True,
+    "bio": True,
+    "first_name": False,
+    "last_name": False,
+    "email": False,
+    "phone_number": False,
+    "social_links": False,
+}
+
+
 # ============================================================================
-# INTERNAL VALIDATION HELPERS
+# VALIDATION HELPERS
 # ============================================================================
 
 
 def _validate_positive_id(
     value: int,
-    *,
     field_name: str,
 ) -> None:
     """
-    Validate an application/database identifier.
-
-    IDs must always be positive integers. This prevents meaningless
-    zero/negative identifiers from reaching repository queries.
+    Ensure an ID is a positive integer.
     """
 
-    if value <= 0:
+    if not isinstance(value, int) or value <= 0:
         raise ValueError(
             f"{field_name} must be a positive integer."
         )
@@ -101,50 +88,45 @@ def _normalize_content(
 ) -> str:
     """
     Normalize and validate comment content.
-
-    Content is treated as untrusted plain text.
-
-    Leading and trailing whitespace is removed, while internal
-    whitespace is preserved.
-
-    HTML, JavaScript, or other markup is not interpreted here.
-    Output encoding remains the responsibility of the presentation layer.
     """
 
-    normalized_content = content.strip()
+    if not isinstance(content, str):
+        raise ValueError(
+            "Comment content must be a string."
+        )
 
-    if not normalized_content:
+    normalized = content.strip()
+
+    if not normalized:
         raise ValueError(
             "Comment content cannot be empty."
         )
 
-    if len(normalized_content) > COMMENT_MAX_LENGTH:
+    if len(normalized) > COMMENT_MAX_LENGTH:
         raise ValueError(
-            f"Comment content cannot exceed "
-            f"{COMMENT_MAX_LENGTH} characters."
+            f"Comment content cannot exceed {COMMENT_MAX_LENGTH} characters."
         )
 
-    return normalized_content
+    return normalized
 
 
 def _get_public_item(
     db: Session,
-    *,
     item_id: int,
 ) -> Item:
     """
-    Retrieve an item that is publicly visible.
+    Retrieve an item only when it is publicly visible.
 
-    Public comments must never expose or attach themselves to
-    pending/rejected/private item posts.
+    A nonexistent item is a bad request for the comments API and is
+    represented as ValueError so the router returns HTTP 400.
 
-    The service deliberately performs the visibility check here rather
-    than trusting the router or repository.
+    An existing but non-public item is deliberately represented as
+    PermissionError so the router returns HTTP 403.
     """
 
     _validate_positive_id(
         item_id,
-        field_name="Item ID",
+        "item_id",
     )
 
     item = get_item_by_id(
@@ -157,12 +139,102 @@ def _get_public_item(
             "Item not found."
         )
 
-    if item.status not in PUBLIC_ITEM_STATUSES:
+    item_status = (item.status or "").strip().lower()
+
+    if item_status not in PUBLIC_ITEM_STATUSES:
         raise PermissionError(
             "Comments are only available for publicly visible items."
         )
 
     return item
+
+
+# ============================================================================
+# PUBLIC PROFILE PRIVACY
+# ============================================================================
+
+
+def _get_public_profile_privacy(
+    user: User,
+) -> dict[str, bool]:
+    """
+    Resolve the effective public-profile privacy settings for a user.
+
+    This follows the same defaults and stored preference semantics used
+    by the public-profile service.
+
+    Invalid or missing preference values fall back to the documented
+    TrackIt defaults.
+    """
+
+    privacy = dict(
+        DEFAULT_PUBLIC_PROFILE_PRIVACY
+    )
+
+    preferences = user.preferences
+
+    if not isinstance(preferences, dict):
+        return privacy
+
+    stored_privacy = preferences.get("privacy")
+
+    if not isinstance(stored_privacy, dict):
+        return privacy
+
+    for field in DEFAULT_PUBLIC_PROFILE_PRIVACY:
+        value = stored_privacy.get(field)
+
+        if isinstance(value, bool):
+            privacy[field] = value
+
+    return privacy
+
+
+# ============================================================================
+# COMMENT RESPONSE SERIALIZATION
+# ============================================================================
+
+
+def serialize_comment(
+    comment: Comment,
+) -> dict[str, object]:
+    """
+    Convert a Comment ORM object into the public API representation.
+
+    Only safe author identity information is exposed.
+
+    The author's profile picture is included only when the author has
+    enabled public visibility for that field.
+    """
+
+    author = comment.user
+
+    if author is None:
+        raise ValueError(
+            "Comment author could not be loaded."
+        )
+
+    privacy = _get_public_profile_privacy(
+        author,
+    )
+
+    return {
+        "id": comment.id,
+        "item_id": comment.item_id,
+        "user_id": comment.user_id,
+        "author": {
+            "id": author.id,
+            "username": author.username,
+            "profile_picture": (
+                author.profile_picture
+                if privacy["profile_picture"]
+                else None
+            ),
+        },
+        "content": comment.content,
+        "created_at": comment.created_at,
+        "updated_at": comment.updated_at,
+    }
 
 
 # ============================================================================
@@ -176,41 +248,33 @@ def create_comment(
     item_id: int,
     user_id: int,
     content: str,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
 ) -> Comment:
     """
     Create a comment on a publicly visible item.
-
-    Business rules:
-
-    - User ID must be positive.
-    - Item must exist.
-    - Item must be publicly visible.
-    - Content cannot be empty.
-    - Content cannot exceed COMMENT_MAX_LENGTH.
-    - Comment ownership comes exclusively from user_id.
-    - Creation is audited.
-
-    The router/dependency layer is expected to require a verified
-    authenticated user before calling this function.
     """
 
     _validate_positive_id(
+        item_id,
+        "item_id",
+    )
+
+    _validate_positive_id(
         user_id,
-        field_name="User ID",
+        "user_id",
     )
 
-    item = _get_public_item(
+    _get_public_item(
         db,
-        item_id=item_id,
+        item_id,
     )
 
-    normalized_content = _normalize_content(content)
+    normalized_content = _normalize_content(
+        content,
+    )
 
     comment = repository_create_comment(
         db,
-        item_id=item.id,
+        item_id=item_id,
         user_id=user_id,
         content=normalized_content,
     )
@@ -220,11 +284,11 @@ def create_comment(
         event_type=AUDIT_COMMENT_CREATED,
         success=True,
         description=(
-            f"Comment {comment.id} created on item {item.id}."
+            f"Comment {comment.id} created on item {item_id}."
         ),
         user_id=user_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
+        resource_type="comment",
+        resource_id=comment.id,
     )
 
     return comment
@@ -242,15 +306,11 @@ def get_comment(
 ) -> Comment | None:
     """
     Retrieve a comment by ID.
-
-    Public visibility/authorization decisions for displaying the
-    comment should be performed by the caller using the associated
-    item state where appropriate.
     """
 
     _validate_positive_id(
         comment_id,
-        field_name="Comment ID",
+        "comment_id",
     )
 
     return get_comment_by_id(
@@ -271,19 +331,16 @@ def list_item_comments(
 ) -> list[Comment]:
     """
     Retrieve comments belonging to a publicly visible item.
-
-    Pending and rejected items are intentionally inaccessible through
-    the public comment service.
     """
 
-    item = _get_public_item(
+    _get_public_item(
         db,
-        item_id=item_id,
+        item_id,
     )
 
     return get_comments_by_item(
         db,
-        item_id=item.id,
+        item_id=item_id,
     )
 
 
@@ -298,40 +355,24 @@ def update_comment(
     comment: Comment,
     user_id: int,
     content: str,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
 ) -> Comment:
     """
     Update a comment owned by the authenticated user.
-
-    Security rules:
-
-    - User ID must be positive.
-    - The comment must belong to the authenticated user.
-    - Content is normalized and validated.
-    - The client cannot change comment ownership.
-    - The comment's item association cannot be changed.
-    - The update is audited.
-
-    Ownership is checked against the persisted comment record.
     """
 
     _validate_positive_id(
         user_id,
-        field_name="User ID",
+        "user_id",
     )
-
-    if comment.id is None or comment.id <= 0:
-        raise ValueError(
-            "Comment must be persisted before it can be updated."
-        )
 
     if comment.user_id != user_id:
         raise PermissionError(
-            "You are not authorized to edit this comment."
+            "You do not have permission to edit this comment."
         )
 
-    normalized_content = _normalize_content(content)
+    normalized_content = _normalize_content(
+        content,
+    )
 
     updated_comment = repository_update_comment(
         db,
@@ -347,8 +388,8 @@ def update_comment(
             f"Comment {comment.id} updated."
         ),
         user_id=user_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
+        resource_type="comment",
+        resource_id=comment.id,
     )
 
     return updated_comment
@@ -364,37 +405,19 @@ def delete_comment(
     *,
     comment: Comment,
     user_id: int,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
 ) -> None:
     """
     Delete a comment owned by the authenticated user.
-
-    Security rules:
-
-    - User ID must be positive.
-    - The comment must belong to the authenticated user.
-    - The client cannot delete another user's comment.
-    - The item association cannot be changed.
-    - The deletion is audited.
-
-    Authorization is checked before the repository is allowed to
-    perform the deletion.
     """
 
     _validate_positive_id(
         user_id,
-        field_name="User ID",
+        "user_id",
     )
-
-    if comment.id is None or comment.id <= 0:
-        raise ValueError(
-            "Comment must be persisted before it can be deleted."
-        )
 
     if comment.user_id != user_id:
         raise PermissionError(
-            "You are not authorized to delete this comment."
+            "You do not have permission to delete this comment."
         )
 
     comment_id = comment.id
@@ -412,8 +435,8 @@ def delete_comment(
             f"Comment {comment_id} deleted."
         ),
         user_id=user_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
+        resource_type="comment",
+        resource_id=comment_id,
     )
 
 
@@ -427,29 +450,15 @@ def admin_delete_comment(
     *,
     comment: Comment,
     admin_id: int,
-    ip_address: str | None = None,
-    user_agent: str | None = None,
 ) -> None:
     """
-    Delete a comment as an administrator.
-
-    Administrator authorization must be established by the router/
-    dependency layer before this function is called.
-
-    The service still validates the administrator ID and performs the
-    mutation/audit itself so that administrative deletion cannot
-    accidentally bypass the service layer.
+    Delete any comment as an administrator.
     """
 
     _validate_positive_id(
         admin_id,
-        field_name="Admin ID",
+        "admin_id",
     )
-
-    if comment.id is None or comment.id <= 0:
-        raise ValueError(
-            "Comment must be persisted before it can be deleted."
-        )
 
     comment_id = comment.id
 
@@ -463,10 +472,9 @@ def admin_delete_comment(
         event_type=AUDIT_ADMIN_COMMENT_DELETED,
         success=True,
         description=(
-            f"Administrator {admin_id} deleted comment "
-            f"{comment_id}."
+            f"Comment {comment_id} deleted by administrator."
         ),
         user_id=admin_id,
-        ip_address=ip_address,
-        user_agent=user_agent,
+        resource_type="comment",
+        resource_id=comment_id,
     )

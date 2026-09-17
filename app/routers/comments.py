@@ -33,7 +33,6 @@ from app.api.deps import (
     get_current_verified_user,
 )
 from app.db.dependencies import get_db
-from app.models.comment import Comment
 from app.models.user import User
 from app.schemas.comment import (
     CommentCreate,
@@ -46,6 +45,7 @@ from app.services.comment import (
     delete_comment,
     get_comment,
     list_item_comments,
+    serialize_comment,
     update_comment,
 )
 
@@ -84,11 +84,15 @@ def create_comment_endpoint(
     """
 
     try:
-        return create_comment(
+        comment = create_comment(
             db,
             item_id=item_id,
             user_id=current_user.id,
             content=payload.content,
+        )
+
+        return serialize_comment(
+            comment,
         )
 
     except PermissionError as exc:
@@ -128,10 +132,15 @@ def list_item_comments_endpoint(
     """
 
     try:
-        return list_item_comments(
+        comments = list_item_comments(
             db,
             item_id=item_id,
         )
+
+        return [
+            serialize_comment(comment)
+            for comment in comments
+        ]
 
     except PermissionError as exc:
         raise HTTPException(
@@ -175,6 +184,7 @@ def get_comment_endpoint(
             db,
             comment_id=comment_id,
         )
+
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -206,7 +216,9 @@ def get_comment_endpoint(
             detail="Comment not found.",
         )
 
-    return comment
+    return serialize_comment(
+        comment,
+    )
 
 
 # ============================================================================
@@ -244,11 +256,15 @@ def update_comment_endpoint(
         )
 
     try:
-        return update_comment(
+        updated_comment = update_comment(
             db,
             comment=comment,
             user_id=current_user.id,
             content=payload.content,
+        )
+
+        return serialize_comment(
+            updated_comment,
         )
 
     except PermissionError as exc:

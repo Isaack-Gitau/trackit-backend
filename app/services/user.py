@@ -357,6 +357,39 @@ def delete_user_account_service(
 # ============================================================================
 
 
+def delete_user_profile_picture_service(
+    db: Session,
+    user: User,
+) -> str | None:
+    """
+    Remove the authenticated user's profile-picture reference.
+
+    The database change is flushed but NOT committed.
+
+    Returns:
+        The previous profile-picture storage key, or None when
+        the user did not have a profile picture.
+
+    The caller is responsible for committing the transaction before
+    deleting the returned physical file from storage.
+    """
+
+    previous_image = user.profile_picture
+
+    if not previous_image:
+        return None
+
+    user.profile_picture = None
+    user.updated_at = datetime.now(timezone.utc)
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return previous_image
+
+
+
 def update_user_profile_service(
     db: Session,
     user: User,

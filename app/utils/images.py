@@ -431,6 +431,32 @@ def _media_root() -> Path:
     return Path(settings.MEDIA_ROOT).expanduser().resolve()
 
 
+def _storage_directory(storage_scope: str) -> Path:
+    """
+    Return the directory used for a supported media storage scope.
+
+    Supported scopes:
+
+        items/
+        profiles/
+
+    The scope is application-controlled and is never accepted directly
+    from an uploaded filename or client-provided path.
+    """
+
+    allowed_scopes = {
+        "items",
+        "profiles",
+    }
+
+    if storage_scope not in allowed_scopes:
+        raise ImageProcessingError(
+            "Invalid image storage scope."
+        )
+
+    return (_media_root() / storage_scope).resolve()
+
+
 def _items_directory() -> Path:
     """
     Return the directory used for item images.
@@ -440,7 +466,19 @@ def _items_directory() -> Path:
         MEDIA_ROOT/items/
     """
 
-    return (_media_root() / "items").resolve()
+    return _storage_directory("items")
+
+
+def _profiles_directory() -> Path:
+    """
+    Return the directory used for profile pictures.
+
+    Images are stored beneath:
+
+        MEDIA_ROOT/profiles/
+    """
+
+    return _storage_directory("profiles")
 
 
 def _ensure_safe_path(
@@ -461,11 +499,17 @@ def _ensure_safe_path(
     return path
 
 
-def _safe_storage_path(filename: str) -> Path:
+def _safe_storage_path(
+    filename: str,
+    storage_scope: str = "items",
+) -> Path:
     """
     Construct and validate the filesystem path for an image filename.
 
     Only a single filename component is accepted.
+
+    The storage scope is application-controlled and must be one of the
+    supported media scopes.
     """
 
     if (
@@ -485,7 +529,7 @@ def _safe_storage_path(filename: str) -> Path:
             "Invalid image filename."
         )
 
-    root = _items_directory()
+    root = _storage_directory(storage_scope)
     path = (root / filename).resolve()
 
     return _ensure_safe_path(path, root)
@@ -499,6 +543,7 @@ def _safe_storage_path(filename: str) -> Path:
 def _save_sanitized_image(
     image: Image.Image,
     image_format: str,
+    storage_scope: str = "items",
 ) -> tuple[str, Path]:
     """
     Re-encode and safely store an image.
@@ -514,7 +559,7 @@ def _save_sanitized_image(
         normalized_format,
     )
 
-    directory = _items_directory()
+    directory = _storage_directory(storage_scope)
 
     directory.mkdir(
         parents=True,
@@ -529,14 +574,20 @@ def _save_sanitized_image(
                 normalized_format
             )
 
-            destination = _safe_storage_path(filename)
+            destination = _safe_storage_path(
+                filename,
+                storage_scope,
+            )
 
             if destination.exists():
                 continue
 
-            # Temporary files are still placed beneath MEDIA_ROOT/items/.
+            # Temporary files remain beneath the selected media scope.
             temporary_name = f".{secrets.token_hex(16)}.tmp"
-            temporary_path = _safe_storage_path(temporary_name)
+            temporary_path = _safe_storage_path(
+                temporary_name,
+                storage_scope,
+            )
 
             try:
                 if normalized_format == "JPEG":
@@ -572,7 +623,7 @@ def _save_sanitized_image(
                 temporary_path.replace(destination)
 
                 return (
-                    f"items/{filename}",
+                    f"{storage_scope}/{filename}",
                     destination,
                 )
 
@@ -678,9 +729,54 @@ def sanitize_and_store_image(
         image.close()
 
 
+def sanitize_and_store_profile_image(
+    source: bytes | bytearray | BinaryIO,
+) -> str:
+    """
+    Validate, sanitize, and securely store a profile picture.
+
+    This uses the same validation and sanitization pipeline as item images,
+    but stores the result beneath:
+
+        MEDIA_ROOT/profiles/
+
+    The returned value is a safe relative storage key suitable for the
+    user's profile_picture database field.
+    """
+
+    data = _read_upload(source)
+
+    if not data:
+        raise ImageProcessingError(
+            "Uploaded image is empty."
+        )
+
+    image, detected_format = _open_image(data)
+
+    try:
+        validate_image_dimensions(image)
+
+        normalized_format = _pillow_format(
+            detected_format
+        )
+
+        storage_key, _ = _save_sanitized_image(
+            image,
+            normalized_format,
+            storage_scope="profiles",
+        )
+
+        return storage_key
+
+    finally:
+        image.close()
+
+
 # ============================================================================
 # Stored Image Deletion
 # ============================================================================
+
+
 
 
 def delete_stored_image(
@@ -719,11 +815,15 @@ def delete_stored_image(
 
     parts = PurePosixPath(storage_key).parts
 
-    if len(parts) != 2 or parts[0] != "items":
+    if (
+        len(parts) != 2
+        or parts[0] not in {"items", "profiles"}
+    ):
         raise ImageProcessingError(
             "Invalid image storage key."
         )
 
+    storage_scope = parts[0]
     filename = parts[1]
 
     if (
@@ -736,7 +836,10 @@ def delete_stored_image(
             "Invalid image storage key."
         )
 
-    path = _safe_storage_path(filename)
+    path = _safe_storage_path(
+        filename,
+        storage_scope,
+    )
 
     try:
         path.unlink(
@@ -787,11 +890,15 @@ def image_storage_key_to_url(
 
     parts = PurePosixPath(storage_key).parts
 
-    if len(parts) != 2 or parts[0] != "items":
+    if (
+        len(parts) != 2
+        or parts[0] not in {"items", "profiles"}
+    ):
         raise ImageProcessingError(
             "Invalid image storage key."
         )
 
+    storage_scope = parts[0]
     filename = parts[1]
 
     if (
@@ -806,7 +913,10 @@ def image_storage_key_to_url(
 
     # Validate that the filename maps to a safe location even though this
     # function only constructs a URL.
-    _safe_storage_path(filename)
+    _safe_storage_path(
+        filename,
+        storage_scope,
+    )
 
     media_url = settings.MEDIA_URL.rstrip("/")
 

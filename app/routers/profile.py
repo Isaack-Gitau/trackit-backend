@@ -64,7 +64,15 @@ and its user-owned data.
 
 import logging
 
-from fastapi import APIRouter, Body, Depends, HTTPException, status
+from fastapi import (
+    APIRouter,
+    Body,
+    Depends,
+    File,
+    HTTPException,
+    UploadFile,
+    status,
+)
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -95,6 +103,7 @@ from app.services.audit_log import (
 from app.services.user import (
     activate_suspended_user,
     delete_user_account_service,
+    delete_user_profile_picture_service,
     demote_admin_to_moderator_service,
     get_public_user_profile_service,
     get_user,
@@ -106,7 +115,11 @@ from app.services.user import (
     update_user_profile_service,
     verify_user_password,
 )
-from app.utils.images import delete_stored_image
+from app.utils.images import (
+    ImageUploadError,
+    delete_stored_image,
+    sanitize_and_store_profile_image,
+)
 
 
 # ============================================================================
@@ -234,6 +247,160 @@ def update_profile(
     return ProfileResponse.model_validate(
         updated_user
     )
+
+
+# ============================================================================
+# UPDATE CURRENT USER PROFILE PICTURE
+# ============================================================================
+
+
+@router.post(
+    "/picture",
+    response_model=ProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload a new profile picture",
+)
+async def upload_profile_picture(
+    image: UploadFile = File(...),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ProfileResponse:
+    """
+    Replace the authenticated user's profile picture.
+
+    The uploaded image is validated and sanitized by the shared
+    TRACKIT image-security pipeline.
+
+    The client-provided filename and MIME type are never trusted.
+
+    The new image is stored beneath:
+
+        MEDIA_ROOT/profiles/
+
+    The database stores only the resulting relative storage key.
+
+    Transaction behavior:
+
+    - The new image is stored first.
+    - The user record is flushed.
+    - The database transaction is explicitly committed.
+    - Only after a successful commit is the previous image removed.
+    - If the database operation fails, the new image is removed and
+      the previous profile picture remains untouched.
+    """
+
+    stored_image: str | None = None
+    previous_image = current_user.profile_picture
+
+    try:
+        stored_image = sanitize_and_store_profile_image(
+            image.file
+        )
+
+        current_user.profile_picture = stored_image
+
+        db.flush()
+        db.commit()
+
+    except ImageUploadError as exc:
+        db.rollback()
+
+        if stored_image:
+            try:
+                delete_stored_image(stored_image)
+            except Exception:
+                # Cleanup must never hide the original upload error.
+                pass
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+        db.rollback()
+
+        if stored_image:
+            try:
+                delete_stored_image(stored_image)
+            except Exception:
+                # Cleanup must never hide the original database error.
+                pass
+
+        raise
+
+    finally:
+        await image.close()
+
+    # The database now definitely references the new image.
+    #
+    # Deleting the old image is best-effort because a filesystem cleanup
+    # failure must not turn an already successful profile update into a
+    # failed API response.
+    if previous_image and previous_image != stored_image:
+        try:
+            delete_stored_image(previous_image)
+        except Exception:
+            logger.warning(
+                "Failed to delete previous profile picture %s",
+                previous_image,
+                exc_info=True,
+            )
+
+    return ProfileResponse.model_validate(
+        current_user
+    )
+
+
+# ============================================================================
+# DELETE CURRENT USER PROFILE PICTURE
+# ============================================================================
+
+
+@router.delete(
+    "/picture",
+    response_model=ProfileResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Delete the current user's profile picture",
+)
+def delete_profile_picture(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user),
+) -> ProfileResponse:
+    """
+    Remove the authenticated user's profile picture.
+
+    The database reference is cleared and committed before the
+    physical image file is removed.
+
+    A filesystem cleanup failure is logged but does not turn an
+    already-successful database operation into a failed response.
+    """
+
+    previous_image = (
+        delete_user_profile_picture_service(
+            db,
+            current_user,
+        )
+    )
+
+    db.commit()
+
+    if previous_image:
+        try:
+            delete_stored_image(previous_image)
+        except Exception:
+            logger.warning(
+                "Failed to delete profile picture %s",
+                previous_image,
+                exc_info=True,
+            )
+
+    return ProfileResponse.model_validate(
+        current_user
+    )
+
+
 
 
 # ============================================================================
