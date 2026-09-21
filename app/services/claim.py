@@ -167,6 +167,8 @@ def create_claim(
         reason=normalized_reason,
     )
 
+    claim.item = item
+
     create_audit_log(
         db,
         event_type=AUDIT_CLAIM_CREATED,

@@ -157,6 +157,17 @@ def test_verified_user_can_create_claim(
     assert data["claimant_id"] == claimant.id
     assert data["status"] == "pending"
 
+    assert data["item"] == {
+        "id": item.id,
+        "title": "Found Test Phone",
+        "type": "found",
+        "category": "Electronics",
+        "location": "Main Library",
+        "image": None,
+    }
+
+    assert "description" not in data["item"]
+
 
 def test_user_cannot_claim_own_item(
     client,
@@ -856,8 +867,22 @@ def test_claimant_can_view_own_claim(
     )
 
     assert response.status_code == 200
-    assert response.json()["id"] == claim_id
-    assert response.json()["claimant_id"] == claimant.id
+
+    data = response.json()
+
+    assert data["id"] == claim_id
+    assert data["claimant_id"] == claimant.id
+
+    assert data["item"] == {
+        "id": item.id,
+        "title": "Found Test Phone",
+        "type": "found",
+        "category": "Electronics",
+        "location": "Main Library",
+        "image": None,
+    }
+
+    assert "description" not in data["item"]
 
 
 def test_normal_user_cannot_view_another_users_claim(
@@ -1040,9 +1065,39 @@ def test_user_can_list_own_claims(
     assert first.json()["id"] in claim_ids
     assert second.json()["id"] in claim_ids
 
+    claims = response.json()
+
     assert all(
         claim["claimant_id"] == claimant.id
-        for claim in response.json()
+        for claim in claims
+    )
+
+    claims_by_item_id = {
+        claim["item_id"]: claim
+        for claim in claims
+    }
+
+    assert claims_by_item_id[item_one.id]["item"] == {
+        "id": item_one.id,
+        "title": "Found Test Phone",
+        "type": "found",
+        "category": "Electronics",
+        "location": "Main Library",
+        "image": None,
+    }
+
+    assert claims_by_item_id[item_two.id]["item"] == {
+        "id": item_two.id,
+        "title": "Found Test Phone",
+        "type": "found",
+        "category": "Electronics",
+        "location": "Main Library",
+        "image": None,
+    }
+
+    assert all(
+        "description" not in claim["item"]
+        for claim in claims
     )
 
 

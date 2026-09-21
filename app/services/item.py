@@ -361,11 +361,19 @@ def delete_item(
 ) -> None:
     """
     Delete an item owned by the current user.
+
+    Claimed items cannot be deleted because they may have
+    associated claim, match, report, and comment records.
     """
 
     if item.user_id != user_id:
         raise PermissionError(
             "You are not authorized to delete this item."
+        )
+
+    if item.status == "claimed":
+        raise PermissionError(
+            "Claimed items cannot be deleted."
         )
 
     stored_image = item.image

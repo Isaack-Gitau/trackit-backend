@@ -1113,6 +1113,42 @@ def test_non_owner_cannot_delete_item(
     assert item.user_id == owner.id
 
 
+def test_owner_cannot_delete_claimed_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Once an item is claimed, its owner cannot delete it.
+    """
+
+    owner = create_test_user(
+        db,
+        user_id=2026,
+        username="claimeddeleteowner",
+        email="claimeddeleteowner@example.com",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3026,
+        user_id=owner.id,
+        item_status="claimed",
+    )
+
+    response = client.delete(
+        f"/api/items/{item.id}",
+        headers=authenticated_headers(owner),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Claimed items cannot be deleted."
+
+    db.refresh(item)
+
+    assert item.user_id == owner.id
+    assert item.status == "claimed"
+
+
 # ============================================================================
 # IDENTITY SPOOFING
 # ============================================================================

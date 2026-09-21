@@ -95,6 +95,31 @@ class ClaimReject(BaseModel):
 
 
 # ============================================================================
+# CLAIM ITEM SUMMARY
+# ============================================================================
+
+
+class ClaimItemSummary(BaseModel):
+    """
+    Safe summary of the item associated with a claim.
+
+    Only fields required by claim interfaces are exposed.
+    Sensitive owner and moderation information is intentionally omitted.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    id: int
+    title: str
+    type: Literal["lost", "found"]
+    category: str
+    location: str
+    image: str | None
+
+
+# ============================================================================
 # CLAIM RESPONSE
 # ============================================================================
 
@@ -111,6 +136,8 @@ class ClaimResponse(BaseModel):
     id: int
     item_id: int
     claimant_id: int
+
+    item: ClaimItemSummary
 
     reason: str
 

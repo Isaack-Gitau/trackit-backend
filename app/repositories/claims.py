@@ -11,7 +11,7 @@ Claim records.
 """
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.claim import Claim
 
@@ -58,11 +58,13 @@ def get_claim_by_id(
     claim_id: int,
 ) -> Claim | None:
     """
-    Retrieve a claim by its primary key.
+    Retrieve a claim by its primary key with its related item loaded.
     """
 
     return db.scalar(
-        select(Claim).where(Claim.id == claim_id)
+        select(Claim)
+        .options(selectinload(Claim.item))
+        .where(Claim.id == claim_id)
     )
 
 
@@ -103,6 +105,7 @@ def get_claims_by_user(
 
     statement = (
         select(Claim)
+        .options(selectinload(Claim.item))
         .where(Claim.claimant_id == claimant_id)
         .order_by(Claim.created_at.desc())
     )
@@ -190,6 +193,7 @@ def get_pending_claims(
 
     statement = (
         select(Claim)
+        .options(selectinload(Claim.item))
         .where(Claim.status == "pending")
         .order_by(Claim.created_at.asc())
     )

@@ -891,7 +891,7 @@ def delete_item_endpoint(
     except PermissionError as exc:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="You are not authorized to delete this item.",
+            detail=str(exc),
         ) from exc
 
     return None
