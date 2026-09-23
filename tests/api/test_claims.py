@@ -823,6 +823,167 @@ def test_normal_user_cannot_approve_claim(
 
     assert response.status_code == 403
 
+
+def test_moderator_can_approve_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1070,
+        username="apimoderator_owner_approve",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1071,
+        username="apimoderator_claimant_approve",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=1072,
+        username="apimoderator_approve",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.patch(
+        f"/api/claims/admin/{claim_id}/approve",
+        headers=auth_headers(moderator),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "approved"
+
+
+def test_moderator_can_list_pending_claims(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1073,
+        username="apimoderator_owner_list",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1074,
+        username="apimoderator_claimant_list",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=1075,
+        username="apimoderator_list",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.get(
+        "/api/claims/admin/pending",
+        headers=auth_headers(moderator),
+    )
+
+    assert response.status_code == 200
+
+    claim_ids = {
+        claim["id"]
+        for claim in response.json()
+    }
+
+    assert claim_id in claim_ids
+
+
+def test_moderator_can_reject_pending_claim(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=1076,
+        username="apimoderator_owner_reject",
+    )
+
+    claimant = create_user(
+        db,
+        user_id=1077,
+        username="apimoderator_claimant_reject",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=1078,
+        username="apimoderator_reject",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    claim_response = client.post(
+        f"/api/claims/items/{item.id}",
+        headers=auth_headers(claimant),
+        json={
+            "reason": "I can prove ownership of this item.",
+        },
+    )
+
+    assert claim_response.status_code == 201
+
+    claim_id = claim_response.json()["id"]
+
+    response = client.patch(
+        f"/api/claims/admin/{claim_id}/reject",
+        headers=auth_headers(moderator),
+        json={
+            "rejection_reason": "Insufficient proof of ownership.",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "rejected"
+    assert (
+        response.json()["rejection_reason"]
+        == "Insufficient proof of ownership."
+    )
+
+
 # ============================================================================
 # CLAIM RETRIEVAL AUTHORIZATION
 # ============================================================================

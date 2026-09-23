@@ -7,14 +7,14 @@ Provides endpoints for:
 - viewing the authenticated user's claims
 - viewing individual claims
 - withdrawing pending claims
-- administrative claim review
+- moderator and administrator claim review
 """
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    get_current_admin,
+    get_current_moderator,
     get_current_verified_user,
 )
 from app.db.dependencies import get_db
@@ -143,7 +143,8 @@ def get_claim_endpoint(
     """
     Retrieve a claim.
 
-    Only the claimant or an administrator may view it.
+    Claimants may view their own claims.
+    Moderators and administrators may view any claim.
     """
 
     claim = get_claim(
@@ -161,7 +162,7 @@ def get_claim_endpoint(
 
     if (
         claim.claimant_id != current_user.id
-        and user_role != "admin"
+        and user_role not in {"moderator", "admin"}
     ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -222,28 +223,30 @@ def withdraw_claim_endpoint(
 
 
 # ============================================================================
-# ADMIN: LIST PENDING CLAIMS
+# MODERATOR / ADMIN: LIST PENDING CLAIMS
 # ============================================================================
 
 
 @router.get(
     "/admin/pending",
     response_model=list[ClaimResponse],
-    summary="List pending claims for review",
+    summary="List pending claims for moderation",
 )
 def list_pending_claims_endpoint(
     db: Session = Depends(get_db),
-    current_user: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
-    Return pending claims awaiting administrative review.
+    Return pending claims awaiting moderation.
+
+    Both moderators and administrators are authorized.
     """
 
     return list_pending_claims(db)
 
 
 # ============================================================================
-# ADMIN: APPROVE CLAIM
+# MODERATOR / ADMIN: APPROVE CLAIM
 # ============================================================================
 
 
@@ -255,10 +258,12 @@ def list_pending_claims_endpoint(
 def approve_claim_endpoint(
     claim_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Approve a pending claim.
+
+    Both moderators and administrators are authorized.
     """
 
     claim = get_claim(
@@ -276,7 +281,7 @@ def approve_claim_endpoint(
         return approve_claim(
             db,
             claim=claim,
-            reviewer_id=current_admin.id,
+            reviewer_id=current_moderator.id,
         )
 
     except ValueError as exc:
@@ -287,7 +292,7 @@ def approve_claim_endpoint(
 
 
 # ============================================================================
-# ADMIN: REJECT CLAIM
+# MODERATOR / ADMIN: REJECT CLAIM
 # ============================================================================
 
 
@@ -300,11 +305,12 @@ def reject_claim_endpoint(
     claim_id: int,
     payload: ClaimReject,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Reject a pending claim.
 
+    Both moderators and administrators are authorized.
     A rejection reason is required.
     """
 
@@ -323,7 +329,7 @@ def reject_claim_endpoint(
         return reject_claim(
             db,
             claim=claim,
-            reviewer_id=current_admin.id,
+            reviewer_id=current_moderator.id,
             rejection_reason=payload.rejection_reason,
         )
 
