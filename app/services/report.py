@@ -27,6 +27,8 @@ Security principles:
 - Duplicate active reports are prevented.
 - Only pending reports may be reviewed.
 - Only reviewed reports may be resolved.
+- Only the reporter may withdraw their own pending report.
+- Withdrawn reports are no longer active.
 - Security-relevant actions are audited.
 """
 
@@ -60,6 +62,7 @@ from app.services.audit_log import (
 REPORT_STATUS_PENDING = ReportStatus.PENDING
 REPORT_STATUS_REVIEWED = ReportStatus.REVIEWED
 REPORT_STATUS_RESOLVED = ReportStatus.RESOLVED
+REPORT_STATUS_WITHDRAWN = ReportStatus.WITHDRAWN
 
 ACTIVE_REPORT_STATUSES = {
     REPORT_STATUS_PENDING,
@@ -247,6 +250,65 @@ def list_reviewed_reports(
     """
 
     return get_reviewed_reports(db)
+
+
+# ============================================================================
+# WITHDRAW
+# ============================================================================
+
+
+def withdraw_report(
+    db: Session,
+    *,
+    report: Report,
+    reporter_id: int,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> Report:
+    """
+    Withdraw a pending report submitted by the authenticated reporter.
+
+    Business rules:
+
+    - Only the reporter who created the report may withdraw it.
+    - Only pending reports may be withdrawn.
+    - Reviewed and resolved reports cannot be withdrawn.
+    - Withdrawn reports remain available in report history.
+    - Withdrawal removes the report from the active-report workflow.
+    - The withdrawal is audited.
+
+    The reporter ID must come from the authenticated user.
+    """
+
+    if report.reporter_id != reporter_id:
+        raise PermissionError(
+            "You can only withdraw your own reports."
+        )
+
+    if report.status != REPORT_STATUS_PENDING:
+        raise ValueError(
+            "Only pending reports can be withdrawn."
+        )
+
+    updated_report = repository_update_report(
+        db,
+        report,
+        status=REPORT_STATUS_WITHDRAWN,
+    )
+
+    create_audit_log(
+        db,
+        event_type=AUDIT_ADMIN_ACTION,
+        success=True,
+        description=(
+            f"Report {report.id} withdrawn."
+        ),
+        user_id=reporter_id,
+        ip_address=ip_address,
+        user_agent=user_agent,
+    )
+
+    return updated_report
 
 
 # ============================================================================

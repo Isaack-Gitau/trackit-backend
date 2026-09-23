@@ -26,6 +26,7 @@ class ReportStatus:
     PENDING = "pending"
     REVIEWED = "reviewed"
     RESOLVED = "resolved"
+    WITHDRAWN = "withdrawn"
 
 
 class TokenType:

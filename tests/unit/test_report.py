@@ -28,6 +28,7 @@ from app.services.report import (
     REPORT_STATUS_PENDING,
     REPORT_STATUS_REVIEWED,
     REPORT_STATUS_RESOLVED,
+    REPORT_STATUS_WITHDRAWN,
     create_report,
     get_report,
     list_item_reports,
@@ -36,6 +37,7 @@ from app.services.report import (
     list_user_reports,
     resolve_report,
     review_report,
+    withdraw_report,
 )
 
 
@@ -620,6 +622,240 @@ def test_resolved_report_is_not_in_reviewed_queue(db):
         current.id != report.id
         for current in reports
     )
+
+
+# ============================================================================
+# WITHDRAW REPORT
+# ============================================================================
+
+
+def test_pending_report_can_be_withdrawn(db):
+    """
+    A pending report can be withdrawn by its reporter.
+    """
+
+    _, report = create_test_report(db)
+
+    result = withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    assert result.status == REPORT_STATUS_WITHDRAWN
+
+
+def test_withdrawn_report_remains_in_user_history(db):
+    """
+    Withdrawn reports remain available in the reporter's history.
+    """
+
+    _, report = create_test_report(db)
+
+    withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    reports = list_user_reports(
+        db,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    report_ids = {
+        current.id
+        for current in reports
+    }
+
+    assert report.id in report_ids
+
+    matching = next(
+        current
+        for current in reports
+        if current.id == report.id
+    )
+
+    assert matching.status == REPORT_STATUS_WITHDRAWN
+
+
+def test_user_cannot_withdraw_another_users_report(db):
+    """
+    A user cannot withdraw a report submitted by another user.
+    """
+
+    _, report = create_test_report(
+        db,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    with pytest.raises(
+        PermissionError,
+        match="only withdraw your own reports",
+    ):
+        withdraw_report(
+            db,
+            report=report,
+            reporter_id=TEST_SECOND_REPORTER_ID,
+        )
+
+
+def test_reviewed_report_cannot_be_withdrawn(db):
+    """
+    Once a report has been reviewed, it cannot be withdrawn.
+    """
+
+    _, report = create_test_report(db)
+
+    reviewer = create_test_reviewer(db)
+
+    review_report(
+        db,
+        report=report,
+        reviewer_id=reviewer.id,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending reports can be withdrawn",
+    ):
+        withdraw_report(
+            db,
+            report=report,
+            reporter_id=TEST_REPORTER_ID,
+        )
+
+
+def test_resolved_report_cannot_be_withdrawn(db):
+    """
+    A resolved report cannot be withdrawn.
+    """
+
+    _, report = create_test_report(db)
+
+    reviewer = create_test_reviewer(db)
+
+    review_report(
+        db,
+        report=report,
+        reviewer_id=reviewer.id,
+    )
+
+    resolve_report(
+        db,
+        report=report,
+        reviewer_id=reviewer.id,
+        resolution_note="Report resolved after investigation.",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending reports can be withdrawn",
+    ):
+        withdraw_report(
+            db,
+            report=report,
+            reporter_id=TEST_REPORTER_ID,
+        )
+
+
+def test_withdrawn_report_cannot_be_withdrawn_again(db):
+    """
+    A withdrawn report cannot be withdrawn twice.
+    """
+
+    _, report = create_test_report(db)
+
+    withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only pending reports can be withdrawn",
+    ):
+        withdraw_report(
+            db,
+            report=report,
+            reporter_id=TEST_REPORTER_ID,
+        )
+
+
+def test_withdrawn_report_no_longer_blocks_new_report(db):
+    """
+    A withdrawn report is no longer active, so the reporter may
+    submit a new report for the same item.
+    """
+
+    item, report = create_test_report(db)
+
+    withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    new_report = create_report(
+        db,
+        item=item,
+        reporter_id=TEST_REPORTER_ID,
+        reason="New issue",
+        description="A new issue has now been identified.",
+    )
+
+    assert new_report.id != report.id
+    assert new_report.status == REPORT_STATUS_PENDING
+
+
+def test_withdrawn_report_is_not_in_pending_queue(db):
+    """
+    Withdrawn reports must leave the administrative pending queue.
+    """
+
+    _, report = create_test_report(db)
+
+    withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    pending = list_pending_reports(db)
+
+    assert all(
+        current.id != report.id
+        for current in pending
+    )
+
+
+def test_withdraw_report_creates_audit_log(db):
+    """
+    Withdrawing a report must create an audit record.
+    """
+
+    _, report = create_test_report(db)
+
+    withdraw_report(
+        db,
+        report=report,
+        reporter_id=TEST_REPORTER_ID,
+    )
+
+    audit_logs = get_audit_logs(db)
+
+    matching = [
+        log
+        for log in audit_logs
+        if log.user_id == TEST_REPORTER_ID
+        and f"Report {report.id} withdrawn" in (
+            log.description or ""
+        )
+    ]
+
+    assert len(matching) == 1
+    assert matching[0].success is True
 
 
 # ============================================================================

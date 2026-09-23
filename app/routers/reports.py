@@ -7,6 +7,7 @@ Provides endpoints for:
 - creating reports against items
 - viewing the authenticated user's reports
 - viewing individual reports
+- withdrawing pending reports
 - administrative report review
 - administrative report resolution
 """
@@ -34,6 +35,7 @@ from app.services.report import (
     list_user_reports,
     resolve_report,
     review_report,
+    withdraw_report,
 )
 
 
@@ -171,6 +173,56 @@ def get_report_endpoint(
         )
 
     return report
+
+
+# ============================================================================
+# WITHDRAW REPORT
+# ============================================================================
+
+
+@router.post(
+    "/{report_id}/withdraw",
+    response_model=ReportResponse,
+    summary="Withdraw a pending report",
+)
+def withdraw_report_endpoint(
+    report_id: int,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user),
+):
+    """
+    Withdraw a pending report submitted by the authenticated user.
+    """
+
+    report = get_report(
+        db,
+        report_id=report_id,
+    )
+
+    if report is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Report not found.",
+        )
+
+    try:
+        return withdraw_report(
+            db,
+            report=report,
+            reporter_id=current_user.id,
+        )
+
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 # ============================================================================

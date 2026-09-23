@@ -27,6 +27,7 @@ ReportStatus = Literal[
     "pending",
     "reviewed",
     "resolved",
+    "withdrawn",
 ]
 
 
