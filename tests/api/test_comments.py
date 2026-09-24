@@ -1248,8 +1248,58 @@ def test_delete_nonexistent_comment_returns_not_found(
 
 
 # ============================================================================
-# ADMIN COMMENT DELETION
+# MODERATOR / ADMIN COMMENT DELETION
 # ============================================================================
+
+
+def test_moderator_can_delete_any_comment(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=2066,
+        username="commentowner31",
+    )
+
+    commenter = create_user(
+        db,
+        user_id=2067,
+        username="commenter31",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=2068,
+        username="commentmoderator31",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    comment = create_comment(
+        db,
+        item_id=item.id,
+        user_id=commenter.id,
+        content="Comment that moderator will remove.",
+    )
+
+    response = client.delete(
+        f"/api/admin/comments/{comment.id}",
+        headers=auth_headers(moderator),
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    comment_id = comment.id
+
+    db.expire_all()
+
+    assert db.get(Comment, comment_id) is None
 
 
 def test_admin_can_delete_any_comment(

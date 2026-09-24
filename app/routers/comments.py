@@ -8,7 +8,7 @@ Provides endpoints for:
 - viewing individual public comments
 - editing owned comments
 - deleting owned comments
-- administrator comment moderation
+- moderator/admin comment moderation
 
 Security principles:
 
@@ -19,7 +19,7 @@ Security principles:
 - Comment ownership is enforced by the service layer.
 - Anonymous users may only read comments belonging to public items.
 - Pending and rejected items are never publicly exposed through comments.
-- Administrators may delete comments for moderation purposes.
+- Moderators and administrators may delete comments for moderation purposes.
 - Comment content is validated as untrusted plain text.
 - IDs are validated by the service layer.
 - Comment-related actions are audit logged.
@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    get_current_admin,
+    get_current_moderator,
     get_current_verified_user,
 )
 from app.db.dependencies import get_db
@@ -335,24 +335,24 @@ def delete_comment_endpoint(
 
 
 # ============================================================================
-# ADMIN: DELETE COMMENT
+# MODERATOR / ADMIN: DELETE COMMENT
 # ============================================================================
 
 
 @router.delete(
     "/admin/comments/{comment_id}",
     status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete a comment as administrator",
+    summary="Delete a comment as moderator or administrator",
 )
 def admin_delete_comment_endpoint(
     comment_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
-    Delete any comment as an administrator.
+    Delete any comment as a moderator or administrator.
 
-    Administrative authorization is enforced by get_current_admin().
+    Moderator/admin authorization is enforced by get_current_moderator().
     The service layer also records the administrative action in the
     audit log.
     """
@@ -372,7 +372,7 @@ def admin_delete_comment_endpoint(
         admin_delete_comment(
             db,
             comment=comment,
-            admin_id=current_admin.id,
+            admin_id=current_moderator.id,
         )
 
     except PermissionError as exc:
