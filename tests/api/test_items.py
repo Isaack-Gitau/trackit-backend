@@ -1290,6 +1290,145 @@ def test_non_admin_cannot_approve_item(
     assert item.status == "pending"
 
 
+def test_moderator_can_approve_pending_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators can approve pending items through the moderation endpoint.
+    """
+
+    owner = create_test_user(
+        db,
+        user_id=2044,
+        username="moderationowner3",
+        email="moderationowner3@example.com",
+    )
+
+    moderator = create_test_user(
+        db,
+        user_id=2045,
+        username="itemmoderator",
+        email="itemmoderator@example.com",
+        role="moderator",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3044,
+        user_id=owner.id,
+        item_status="pending",
+    )
+
+    response = client.patch(
+        f"/api/items/{item.id}/approve",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == item.id
+    assert data["status"] == "approved"
+
+
+def test_moderator_can_reject_pending_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators can reject pending items through the moderation endpoint.
+    """
+
+    owner = create_test_user(
+        db,
+        user_id=2046,
+        username="moderationowner4",
+        email="moderationowner4@example.com",
+    )
+
+    moderator = create_test_user(
+        db,
+        user_id=2047,
+        username="itemmoderatorreject",
+        email="itemmoderatorreject@example.com",
+        role="moderator",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3046,
+        user_id=owner.id,
+        item_status="pending",
+    )
+
+    response = client.patch(
+        f"/api/items/{item.id}/reject",
+        headers=authenticated_headers(moderator),
+        json={
+            "reason": "The submitted item information needs correction.",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == item.id
+    assert data["status"] == "rejected"
+
+    db.refresh(item)
+
+    assert item.rejection_reason == (
+        "The submitted item information needs correction."
+    )
+
+
+def test_non_admin_cannot_reject_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Ordinary users cannot access the item rejection endpoint.
+    """
+
+    owner = create_test_user(
+        db,
+        user_id=2048,
+        username="moderationowner5",
+        email="moderationowner5@example.com",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=2049,
+        username="ordinaryrejectuser",
+        email="ordinaryrejectuser@example.com",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3048,
+        user_id=owner.id,
+        item_status="pending",
+    )
+
+    response = client.patch(
+        f"/api/items/{item.id}/reject",
+        headers=authenticated_headers(user),
+        json={
+            "reason": "This should not be allowed.",
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(item)
+
+    assert item.status == "pending"
+
+
 # ============================================================================
 # IMAGE UPLOAD SECURITY
 # ============================================================================

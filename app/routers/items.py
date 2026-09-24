@@ -49,7 +49,7 @@ from sqlalchemy.orm import Session
 from starlette.datastructures import FormData, UploadFile
 
 from app.api.deps import (
-    get_current_admin,
+    get_current_moderator,
     get_current_verified_user,
 )
 from app.db.dependencies import get_db
@@ -627,7 +627,7 @@ def list_my_items_endpoint(
 
 
 # ============================================================================
-# ADMIN MODERATION — APPROVE
+# MODERATOR / ADMIN MODERATION — APPROVE
 # ============================================================================
 
 
@@ -639,12 +639,12 @@ def list_my_items_endpoint(
 def approve_item_endpoint(
     item_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Approve a pending item.
 
-    Administrator authorization is required.
+    Moderator or administrator authorization is required.
     """
 
     item = get_item(
@@ -662,7 +662,7 @@ def approve_item_endpoint(
         return approve_item(
             db,
             item=item,
-            admin_user_id=current_admin.id,
+            admin_user_id=current_moderator.id,
         )
 
     except ValueError as exc:
@@ -673,7 +673,7 @@ def approve_item_endpoint(
 
 
 # ============================================================================
-# ADMIN MODERATION — REJECT
+# MODERATOR / ADMIN MODERATION — REJECT
 # ============================================================================
 
 
@@ -686,12 +686,12 @@ def reject_item_endpoint(
     item_id: int,
     payload: ItemReject,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Reject a pending item.
 
-    Administrator authorization is required.
+    Moderator or administrator authorization is required.
     A rejection reason is mandatory.
     """
 
@@ -710,7 +710,7 @@ def reject_item_endpoint(
         return reject_item(
             db,
             item=item,
-            admin_user_id=current_admin.id,
+            admin_user_id=current_moderator.id,
             reason=payload.reason,
         )
 
