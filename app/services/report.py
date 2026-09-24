@@ -1,7 +1,7 @@
 """
 TRACKIT Report Service.
 
-Business logic for creating, retrieving, and administratively
+Business logic for creating, retrieving, and moderator/admin
 reviewing reports against items.
 
 Architecture:
@@ -19,7 +19,7 @@ Model
 Security principles:
 
 - Reporter identity always comes from the authenticated user.
-- Reviewer identity always comes from the authenticated administrator.
+- Reviewer identity always comes from the authenticated moderator or administrator.
 - Clients cannot directly choose report status.
 - Clients cannot directly choose reviewer fields.
 - Reports can only be submitted against existing items.
@@ -227,9 +227,9 @@ def list_pending_reports(
     db: Session,
 ) -> list[Report]:
     """
-    Retrieve pending reports for administrative review.
+    Retrieve pending reports for moderator/admin review.
 
-    Admin authorization must be enforced by the caller.
+    Moderator/admin authorization must be enforced by the caller.
     """
 
     return get_pending_reports(db)
@@ -246,7 +246,7 @@ def list_reviewed_reports(
     """
     Retrieve reviewed reports awaiting resolution.
 
-    Admin authorization must be enforced by the caller.
+    Moderator/admin authorization must be enforced by the caller.
     """
 
     return get_reviewed_reports(db)
@@ -330,7 +330,7 @@ def review_report(
     Only pending reports may be reviewed.
 
     The caller is responsible for ensuring that reviewer_id
-    belongs to an authorized administrator.
+    belongs to an authorized moderator or administrator.
     """
 
     if report.status != REPORT_STATUS_PENDING:
@@ -385,7 +385,7 @@ def resolve_report(
     Only reviewed reports may be resolved.
 
     The caller is responsible for ensuring that reviewer_id
-    belongs to an authorized administrator.
+    belongs to an authorized moderator or administrator.
     """
 
     if report.status != REPORT_STATUS_REVIEWED:

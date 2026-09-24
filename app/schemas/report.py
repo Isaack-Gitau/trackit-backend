@@ -2,7 +2,7 @@
 TRACKIT Report Schemas.
 
 Pydantic schemas used for report creation,
-administrative review, resolution, and API responses.
+moderator/admin review, resolution, and API responses.
 
 Security principles:
 
@@ -10,7 +10,7 @@ Security principles:
 - reviewed_by is never accepted from the client.
 - status is controlled by the service layer.
 - reviewed_at is controlled by the service layer.
-- Resolution notes are controlled by the administrative workflow.
+- Resolution notes are controlled by the moderator/admin workflow.
 """
 
 from datetime import datetime
@@ -96,7 +96,7 @@ class ReportCreate(BaseModel):
 
 class ReportResolve(BaseModel):
     """
-    Data required for an administrator to resolve a report.
+    Data required for a moderator or administrator to resolve a report.
     """
 
     resolution_note: str = Field(

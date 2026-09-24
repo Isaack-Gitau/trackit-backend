@@ -16,7 +16,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.api.deps import (
-    get_current_admin,
+    get_current_moderator,
     get_current_verified_user,
 )
 from app.db.dependencies import get_db
@@ -226,7 +226,7 @@ def withdraw_report_endpoint(
 
 
 # ============================================================================
-# ADMIN: LIST PENDING REPORTS
+# MODERATOR / ADMIN: LIST PENDING REPORTS
 # ============================================================================
 
 
@@ -237,17 +237,17 @@ def withdraw_report_endpoint(
 )
 def list_pending_reports_endpoint(
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
-    Return pending reports awaiting administrative review.
+    Return pending reports awaiting moderator or administrator review.
     """
 
     return list_pending_reports(db)
 
 
 # ============================================================================
-# ADMIN: LIST REVIEWED REPORTS
+# MODERATOR / ADMIN: LIST REVIEWED REPORTS
 # ============================================================================
 
 
@@ -258,17 +258,17 @@ def list_pending_reports_endpoint(
 )
 def list_reviewed_reports_endpoint(
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
-    Return reviewed reports awaiting administrative resolution.
+    Return reviewed reports awaiting moderator or administrator resolution.
     """
 
     return list_reviewed_reports(db)
 
 
 # ============================================================================
-# ADMIN: REVIEW REPORT
+# MODERATOR / ADMIN: REVIEW REPORT
 # ============================================================================
 
 
@@ -280,10 +280,12 @@ def list_reviewed_reports_endpoint(
 def review_report_endpoint(
     report_id: int,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Mark a pending report as reviewed.
+
+    Moderator or administrator authorization is required.
     """
 
     report = get_report(
@@ -301,7 +303,7 @@ def review_report_endpoint(
         return review_report(
             db,
             report=report,
-            reviewer_id=current_admin.id,
+            reviewer_id=current_moderator.id,
         )
 
     except ValueError as exc:
@@ -312,7 +314,7 @@ def review_report_endpoint(
 
 
 # ============================================================================
-# ADMIN: RESOLVE REPORT
+# MODERATOR / ADMIN: RESOLVE REPORT
 # ============================================================================
 
 
@@ -325,11 +327,12 @@ def resolve_report_endpoint(
     report_id: int,
     payload: ReportResolve,
     db: Session = Depends(get_db),
-    current_admin: User = Depends(get_current_admin),
+    current_moderator: User = Depends(get_current_moderator),
 ):
     """
     Resolve a reviewed report.
 
+    Moderator or administrator authorization is required.
     A resolution note is required.
     """
 
@@ -348,7 +351,7 @@ def resolve_report_endpoint(
         return resolve_report(
             db,
             report=report,
-            reviewer_id=current_admin.id,
+            reviewer_id=current_moderator.id,
             resolution_note=payload.resolution_note,
         )
 
