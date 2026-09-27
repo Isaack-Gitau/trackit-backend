@@ -560,6 +560,56 @@ def test_normal_user_cannot_review_pending_report(
     assert report.status == "pending"
 
 
+def test_moderator_cannot_review_own_report(
+    client,
+    db,
+):
+    """
+    A moderator cannot review a report they submitted themselves.
+    The API must return 403 rather than an internal server error.
+    """
+
+    owner = create_user(
+        db,
+        user_id=2034,
+        username="apireport_owner_self_review",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=2035,
+        username="apireport_moderator_self_review",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    report = create_report(
+        db,
+        item_id=item.id,
+        reporter_id=moderator.id,
+    )
+
+    response = client.patch(
+        f"/api/reports/admin/{report.id}/review",
+        headers=auth_headers(moderator),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You cannot moderate your own report."
+    )
+
+    db.refresh(report)
+
+    assert report.status == "pending"
+    assert report.reviewed_by is None
+    assert report.reviewed_at is None
+
+
 def test_unauthenticated_user_cannot_review_pending_report(
     client,
     db,
@@ -785,6 +835,70 @@ def test_normal_user_cannot_resolve_reviewed_report(
     )
 
     assert response.status_code == 403
+
+    db.refresh(report)
+
+    assert report.status == "reviewed"
+
+
+def test_moderator_cannot_resolve_own_report(
+    client,
+    db,
+):
+    """
+    A moderator cannot resolve a report they submitted themselves.
+    The API must return 403 rather than an internal server error.
+    """
+
+    owner = create_user(
+        db,
+        user_id=2040,
+        username="apireport_owner_self_resolve",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=2041,
+        username="apireport_moderator_self_resolve",
+        role="moderator",
+    )
+
+    reviewer = create_user(
+        db,
+        user_id=2042,
+        username="apireport_admin_review_self_resolve",
+        role="admin",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    report = create_report(
+        db,
+        item_id=item.id,
+        reporter_id=moderator.id,
+    )
+
+    review_report(
+        db,
+        report=report,
+        reviewer_id=reviewer.id,
+    )
+
+    response = client.patch(
+        f"/api/reports/admin/{report.id}/resolve",
+        headers=auth_headers(moderator),
+        json={
+            "resolution_note": "This should not be allowed.",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You cannot moderate your own report."
+    )
 
     db.refresh(report)
 

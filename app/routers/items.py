@@ -741,6 +741,12 @@ def approve_item_endpoint(
             admin_user_id=current_moderator.id,
         )
 
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -789,6 +795,12 @@ def reject_item_endpoint(
             admin_user_id=current_moderator.id,
             reason=payload.reason,
         )
+
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         raise HTTPException(
