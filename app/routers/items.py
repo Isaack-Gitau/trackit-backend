@@ -67,6 +67,7 @@ from app.services.item import (
     delete_item,
     get_item,
     get_public_item,
+    list_items_for_admin,
     list_public_items,
     list_user_items,
     reject_item,
@@ -627,8 +628,83 @@ def list_my_items_endpoint(
 
 
 # ============================================================================
-# MODERATOR / ADMIN MODERATION — APPROVE
+# MODERATOR / ADMIN MODERATION — ITEM QUEUE
 # ============================================================================
+
+
+@router.get(
+    "/admin/moderation",
+    response_model=list[ItemResponse],
+    summary="List items for moderation",
+)
+def list_items_for_moderation_endpoint(
+    search: str | None = Query(
+        default=None,
+        max_length=100,
+        description="Search item title or description.",
+    ),
+    item_type: str | None = Query(
+        default=None,
+        alias="type",
+        pattern="^(lost|found)$",
+        description="Filter by item type.",
+    ),
+    category: str | None = Query(
+        default=None,
+        max_length=100,
+        description="Filter by category.",
+    ),
+    location: str | None = Query(
+        default=None,
+        max_length=255,
+        description="Filter by location.",
+    ),
+    item_status: str | None = Query(
+        default=None,
+        alias="status",
+        pattern="^(pending|approved|rejected|claimed)$",
+        description="Filter by moderation/status state.",
+    ),
+    page: int = Query(
+        default=1,
+        ge=1,
+        description="Page number.",
+    ),
+    limit: int = Query(
+        default=20,
+        ge=1,
+        le=100,
+        description="Number of items per page.",
+    ),
+    db: Session = Depends(get_db),
+    current_moderator: User = Depends(get_current_moderator),
+):
+    """
+    Retrieve items for moderator or administrator review.
+
+    The backend authorization layer allows both moderators and
+    administrators to access this internal moderation queue.
+
+    The frontend can request status=pending to obtain items awaiting
+    moderation. Other statuses are available for moderation history
+    and administrative review.
+    """
+
+    return list_items_for_admin(
+        db,
+        search=search,
+        item_type=item_type,
+        category=category,
+        location=location,
+        status=item_status,
+        page=page,
+        limit=limit,
+    )
+
+
+# ============================================================================
+# MODERATOR / ADMIN MODERATION — APPROVE
+# ===========================================================================
 
 
 @router.patch(

@@ -11,6 +11,8 @@ Security principles:
 - status is controlled by the service layer.
 - reviewed_at is controlled by the service layer.
 - Resolution notes are controlled by the moderator/admin workflow.
+- Normal report responses expose only reporter_id.
+- Moderation report responses expose only reporter id + username.
 """
 
 from datetime import datetime
@@ -126,13 +128,38 @@ class ReportResolve(BaseModel):
 
 
 # ============================================================================
+# MODERATION IDENTITY
+# ============================================================================
+
+
+class ReporterModerationIdentity(BaseModel):
+    """
+    Restricted reporter identity exposed only to
+    moderator/admin report workflows.
+
+    This intentionally excludes private profile information
+    such as email, phone, address, social links, and preferences.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    id: int
+    username: str
+
+
+# ============================================================================
 # REPORT RESPONSE
 # ============================================================================
 
 
 class ReportResponse(BaseModel):
     """
-    API representation of a report.
+    API representation of a report for normal user-facing endpoints.
+
+    Only reporter_id is exposed. No reporter profile information
+    is included in this response.
     """
 
     model_config = ConfigDict(
@@ -143,6 +170,45 @@ class ReportResponse(BaseModel):
 
     item_id: int
     reporter_id: int
+
+    reason: str
+    description: str
+
+    status: ReportStatus
+
+    reviewed_by: int | None
+    reviewed_at: datetime | None
+
+    resolution_note: str | None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+# ============================================================================
+# MODERATION REPORT RESPONSE
+# ============================================================================
+
+
+class ModerationReportResponse(BaseModel):
+    """
+    API representation of a report for moderator/admin workflows.
+
+    Moderators/admins receive only the reporter's public moderation
+    identity: id + username.
+
+    Private profile information is intentionally excluded.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    id: int
+
+    item_id: int
+    reporter_id: int
+    reporter: ReporterModerationIdentity
 
     reason: str
     description: str

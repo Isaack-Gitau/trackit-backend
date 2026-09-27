@@ -1861,7 +1861,8 @@ def test_moderator_can_view_another_users_profile(
     db: Session,
 ):
     """
-    Moderators have moderator-level access to user details.
+    Moderators may view moderation-relevant account details,
+    but private profile and contact information is excluded.
     """
 
     moderator = create_moderator(
@@ -1878,6 +1879,24 @@ def test_moderator_can_view_another_users_profile(
         email="moderatorprofiletarget@example.com",
     )
 
+    target_user.first_name = "Private"
+    target_user.last_name = "Person"
+    target_user.profile_picture = (
+        "https://example.com/private-avatar.jpg"
+    )
+    target_user.phone_number = "+254700000004"
+    target_user.bio = "Private moderation target profile."
+    target_user.address = "Private address, Nairobi"
+    target_user.social_links = {
+        "github": "https://github.com/private-target",
+    }
+    target_user.preferences = {
+        "theme": "dark",
+        "notifications": True,
+    }
+
+    db.commit()
+
     response = client.get(
         f"/api/profile/admin/{target_user.id}",
         headers=authenticated_headers(moderator),
@@ -1887,8 +1906,31 @@ def test_moderator_can_view_another_users_profile(
 
     data = response.json()
 
+    # Moderation-safe identity and account status are visible.
     assert data["id"] == target_user.id
+    assert data["username"] == "moderatorprofiletarget"
     assert data["role"] == UserRole.USER
+    assert data["is_active"] is True
+    assert data["is_verified"] is True
+    assert data["deactivated_at"] is None
+    assert data["deactivated_until"] is None
+    assert data["deactivation_reason"] is None
+
+    # Private profile/contact information is not exposed.
+    forbidden_fields = {
+        "first_name",
+        "last_name",
+        "email",
+        "profile_picture",
+        "phone_number",
+        "bio",
+        "address",
+        "social_links",
+        "preferences",
+        "password_changed_at",
+    }
+
+    assert forbidden_fields.isdisjoint(data)
 
 
 def test_normal_user_cannot_view_admin_user_profile(

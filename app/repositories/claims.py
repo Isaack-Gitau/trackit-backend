@@ -82,6 +82,10 @@ def get_claim_by_id_for_update(
 
     return db.scalar(
         select(Claim)
+        .options(
+            selectinload(Claim.item),
+            selectinload(Claim.claimant),
+        )
         .where(Claim.id == claim_id)
         .with_for_update()
     )
@@ -186,14 +190,19 @@ def get_pending_claims(
     db: Session,
 ) -> list[Claim]:
     """
-    Retrieve all pending claims.
+    Retrieve all pending claims for moderation.
 
-    Intended primarily for administrative review.
+    The associated item and claimant are eagerly loaded so
+    moderation responses can expose only the restricted
+    claimant identity required for review.
     """
 
     statement = (
         select(Claim)
-        .options(selectinload(Claim.item))
+        .options(
+            selectinload(Claim.item),
+            selectinload(Claim.claimant),
+        )
         .where(Claim.status == "pending")
         .order_by(Claim.created_at.asc())
     )

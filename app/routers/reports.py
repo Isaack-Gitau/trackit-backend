@@ -23,6 +23,7 @@ from app.db.dependencies import get_db
 from app.models.user import User
 from app.repositories.items import get_item_by_id
 from app.schemas.report import (
+    ModerationReportResponse,
     ReportCreate,
     ReportResolve,
     ReportResponse,
@@ -232,7 +233,7 @@ def withdraw_report_endpoint(
 
 @router.get(
     "/admin/pending",
-    response_model=list[ReportResponse],
+    response_model=list[ModerationReportResponse],
     summary="List pending reports for review",
 )
 def list_pending_reports_endpoint(
@@ -253,7 +254,7 @@ def list_pending_reports_endpoint(
 
 @router.get(
     "/admin/reviewed",
-    response_model=list[ReportResponse],
+    response_model=list[ModerationReportResponse],
     summary="List reviewed reports awaiting resolution",
 )
 def list_reviewed_reports_endpoint(
@@ -274,7 +275,7 @@ def list_reviewed_reports_endpoint(
 
 @router.patch(
     "/admin/{report_id}/review",
-    response_model=ReportResponse,
+    response_model=ModerationReportResponse,
     summary="Review a pending report",
 )
 def review_report_endpoint(
@@ -320,7 +321,7 @@ def review_report_endpoint(
 
 @router.patch(
     "/admin/{report_id}/resolve",
-    response_model=ReportResponse,
+    response_model=ModerationReportResponse,
     summary="Resolve a reviewed report",
 )
 def resolve_report_endpoint(

@@ -11,7 +11,7 @@ Report records.
 """
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.models.report import Report
 
@@ -173,6 +173,9 @@ def get_pending_reports(
 
     statement = (
         select(Report)
+        .options(
+            selectinload(Report.reporter),
+        )
         .where(Report.status == "pending")
         .order_by(Report.created_at.asc())
     )
@@ -196,6 +199,9 @@ def get_reviewed_reports(
 
     statement = (
         select(Report)
+        .options(
+            selectinload(Report.reporter),
+        )
         .where(Report.status == "reviewed")
         .order_by(Report.reviewed_at.asc())
     )

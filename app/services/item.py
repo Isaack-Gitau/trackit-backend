@@ -440,7 +440,7 @@ def approve_item(
     5. Generate qualifying matches.
     6. Notify the owners involved in those matches.
 
-    This function never creates a claim automatically.
+    Moderators and administrators cannot approve their own items.
     """
 
     if item.status != "pending":
@@ -452,6 +452,11 @@ def approve_item(
         reviewer_id=reviewer_id,
         admin_user_id=admin_user_id,
     )
+
+    if item.user_id == resolved_reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own item."
+        )
 
     reviewed_at = datetime.now(timezone.utc)
 
@@ -515,6 +520,8 @@ def reject_item(
 
     rejection_reason is the preferred argument name. reason is retained
     as a compatibility alias for existing callers.
+
+    Moderators and administrators cannot reject their own items.
     """
 
     if item.status != "pending":
@@ -526,6 +533,11 @@ def reject_item(
         reviewer_id=reviewer_id,
         admin_user_id=admin_user_id,
     )
+
+    if item.user_id == resolved_reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own item."
+        )
 
     if (
         rejection_reason is not None

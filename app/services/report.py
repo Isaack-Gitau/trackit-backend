@@ -27,6 +27,7 @@ Security principles:
 - Duplicate active reports are prevented.
 - Only pending reports may be reviewed.
 - Only reviewed reports may be resolved.
+- Moderators/admins cannot review or resolve their own reports.
 - Only the reporter may withdraw their own pending report.
 - Withdrawn reports are no longer active.
 - Security-relevant actions are audited.
@@ -329,6 +330,9 @@ def review_report(
 
     Only pending reports may be reviewed.
 
+    A moderator or administrator cannot review a report
+    that they submitted themselves.
+
     The caller is responsible for ensuring that reviewer_id
     belongs to an authorized moderator or administrator.
     """
@@ -336,6 +340,11 @@ def review_report(
     if report.status != REPORT_STATUS_PENDING:
         raise ValueError(
             "Only pending reports can be reviewed."
+        )
+
+    if report.reporter_id == reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own report."
         )
 
     reviewed_at = datetime.now(timezone.utc)
@@ -384,6 +393,9 @@ def resolve_report(
 
     Only reviewed reports may be resolved.
 
+    A moderator or administrator cannot resolve a report
+    that they originally submitted themselves.
+
     The caller is responsible for ensuring that reviewer_id
     belongs to an authorized moderator or administrator.
     """
@@ -391,6 +403,11 @@ def resolve_report(
     if report.status != REPORT_STATUS_REVIEWED:
         raise ValueError(
             "Only reviewed reports can be resolved."
+        )
+
+    if report.reporter_id == reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own report."
         )
 
     normalized_note = resolution_note.strip()

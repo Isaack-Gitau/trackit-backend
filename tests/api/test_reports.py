@@ -155,12 +155,26 @@ def test_moderator_can_list_pending_reports(
 
     assert response.status_code == 200
 
+    reports = response.json()
+
     report_ids = {
         current["id"]
-        for current in response.json()
+        for current in reports
     }
 
     assert report.id in report_ids
+
+    pending_report = next(
+        current
+        for current in reports
+        if current["id"] == report.id
+    )
+
+    assert pending_report["reporter_id"] == reporter.id
+    assert pending_report["reporter"] == {
+        "id": reporter.id,
+        "username": reporter.username,
+    }
 
 
 def test_admin_can_list_pending_reports(
@@ -300,12 +314,26 @@ def test_moderator_can_list_reviewed_reports(
 
     assert response.status_code == 200
 
+    reports = response.json()
+
     report_ids = {
         current["id"]
-        for current in response.json()
+        for current in reports
     }
 
     assert report.id in report_ids
+
+    reviewed_report = next(
+        current
+        for current in reports
+        if current["id"] == report.id
+    )
+
+    assert reviewed_report["reporter_id"] == reporter.id
+    assert reviewed_report["reporter"] == {
+        "id": reporter.id,
+        "username": reporter.username,
+    }
 
 
 def test_admin_can_list_reviewed_reports(
@@ -432,6 +460,11 @@ def test_moderator_can_review_pending_report(
     assert data["id"] == report.id
     assert data["status"] == "reviewed"
     assert data["reviewed_by"] == moderator.id
+    assert data["reporter_id"] == reporter.id
+    assert data["reporter"] == {
+        "id": reporter.id,
+        "username": reporter.username,
+    }
 
 
 def test_admin_can_review_pending_report(
@@ -625,6 +658,11 @@ def test_moderator_can_resolve_reviewed_report(
     assert data["id"] == report.id
     assert data["status"] == "resolved"
     assert data["reviewed_by"] == moderator.id
+    assert data["reporter_id"] == reporter.id
+    assert data["reporter"] == {
+        "id": reporter.id,
+        "username": reporter.username,
+    }
     assert (
         data["resolution_note"]
         == "Report investigated and resolved."

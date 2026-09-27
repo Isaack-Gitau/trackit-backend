@@ -82,12 +82,14 @@ from app.api.deps import (
     get_current_user,
 )
 from app.db.dependencies import get_db
+from app.core.constants import UserRole
 from app.models.user import User
 from app.schemas.profile import (
     AdminEmailDeliveryResult,
     AdminEmailRequest,
     AdminEmailResponse,
     AdminUserDetailResponse,
+    ModerationUserDetailResponse,
     ProfilePrivacyResponse,
     ProfilePrivacyUpdate,
     ProfileResponse,
@@ -730,27 +732,29 @@ async def send_admin_email(
 
 @router.get(
     "/admin/{user_id}",
-    response_model=AdminUserDetailResponse,
+    response_model=AdminUserDetailResponse | ModerationUserDetailResponse,
     status_code=status.HTTP_200_OK,
-    summary="Get detailed user profile for moderation",
+    summary="Get user details for moderation",
 )
 def get_admin_user_profile(
     user_id: int,
     db: Session = Depends(get_db),
     current_moderator: User = Depends(get_current_moderator),
-) -> AdminUserDetailResponse:
+) -> AdminUserDetailResponse | ModerationUserDetailResponse:
     """
-    Return detailed profile and account information for any user.
+    Return user details for moderation or administration.
 
     Access is restricted to moderators and administrators.
 
-    Administrators inherit moderator-level privileges.
+    Administrators inherit moderator-level privileges and receive
+    the broader administrative user-detail response.
+
+    Moderators receive only the moderation-relevant account
+    identity and status fields.
 
     The authenticated moderator/administrator is identified
-    by the JWT.
-
-    Security-sensitive authentication fields are deliberately
-    excluded by AdminUserDetailResponse.
+    by the JWT, while the database-backed user role determines
+    which response representation is returned.
     """
 
     user = get_user(
@@ -764,7 +768,12 @@ def get_admin_user_profile(
             detail="User not found.",
         )
 
-    return AdminUserDetailResponse.model_validate(
+    if current_moderator.role == UserRole.ADMIN:
+        return AdminUserDetailResponse.model_validate(
+            user
+        )
+
+    return ModerationUserDetailResponse.model_validate(
         user
     )
 

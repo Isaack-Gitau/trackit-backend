@@ -1339,6 +1339,53 @@ def test_admin_can_reject_pending_item(db, admin_user):
     assert rejected.status == "rejected"
 
 
+def test_owner_cannot_approve_own_pending_item(db, admin_user):
+    """
+    A moderator or administrator cannot approve their own item.
+    """
+
+    item = create_test_item(
+        db,
+        user_id=admin_user.id,
+    )
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own item",
+    ):
+        approve_item(
+            db,
+            item=item,
+            reviewer_id=admin_user.id,
+        )
+
+    assert item.status == "pending"
+
+
+def test_owner_cannot_reject_own_pending_item(db, admin_user):
+    """
+    A moderator or administrator cannot reject their own item.
+    """
+
+    item = create_test_item(
+        db,
+        user_id=admin_user.id,
+    )
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own item",
+    ):
+        reject_item(
+            db,
+            item=item,
+            reviewer_id=admin_user.id,
+            rejection_reason="Insufficient information.",
+        )
+
+    assert item.status == "pending"
+
+
 # ============================================================================
 # RESTORED MODERATION AND MATCHING REGRESSION TESTS
 # ============================================================================

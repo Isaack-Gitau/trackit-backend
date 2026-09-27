@@ -828,6 +828,53 @@ def test_only_pending_claim_can_be_withdrawn(db):
 # ============================================================================
 
 
+def test_claimant_cannot_approve_own_claim(db):
+    """
+    A claimant must not be able to approve their own claim,
+    even when acting as a moderator or administrator.
+    """
+
+    _, claim = create_test_claim(db)
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own claim",
+    ):
+        approve_claim(
+            db,
+            claim=claim,
+            reviewer_id=TEST_CLAIMANT_ID,
+        )
+
+    assert claim.status == CLAIM_STATUS_PENDING
+    assert claim.reviewed_by is None
+    assert claim.reviewed_at is None
+
+
+def test_claimant_cannot_reject_own_claim(db):
+    """
+    A claimant must not be able to reject their own claim,
+    even when acting as a moderator or administrator.
+    """
+
+    _, claim = create_test_claim(db)
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own claim",
+    ):
+        reject_claim(
+            db,
+            claim=claim,
+            reviewer_id=TEST_CLAIMANT_ID,
+            rejection_reason="This claim should not be self-reviewed.",
+        )
+
+    assert claim.status == CLAIM_STATUS_PENDING
+    assert claim.reviewed_by is None
+    assert claim.reviewed_at is None
+
+
 def test_admin_can_approve_pending_claim(db):
     """
     A pending claim can be approved by the review service.

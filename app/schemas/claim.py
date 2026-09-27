@@ -10,7 +10,8 @@ Security principles:
 - reviewed_by is never accepted from the client.
 - status is controlled by the service layer.
 - Rejection reasons are validated before persistence.
-- Response schemas use SQLAlchemy attributes directly.
+- Normal user responses expose only the claimant ID.
+- Moderation responses expose only the claimant ID and username.
 """
 
 from datetime import datetime
@@ -120,13 +121,38 @@ class ClaimItemSummary(BaseModel):
 
 
 # ============================================================================
+# CLAIMANT MODERATION IDENTITY
+# ============================================================================
+
+
+class ClaimantModerationIdentity(BaseModel):
+    """
+    Minimal user identity exposed to moderators and administrators
+    when reviewing a claim.
+
+    This intentionally excludes private profile and contact details.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    id: int
+    username: str
+
+
+# ============================================================================
 # CLAIM RESPONSE
 # ============================================================================
 
 
 class ClaimResponse(BaseModel):
     """
-    API representation of a claim.
+    API representation of a claim for normal authenticated
+    user-facing endpoints.
+
+    Only claimant_id is exposed to avoid unnecessarily exposing
+    another user's identity.
     """
 
     model_config = ConfigDict(
@@ -136,6 +162,44 @@ class ClaimResponse(BaseModel):
     id: int
     item_id: int
     claimant_id: int
+
+    item: ClaimItemSummary
+
+    reason: str
+
+    status: ClaimStatus
+
+    rejection_reason: str | None
+
+    reviewed_by: int | None
+    reviewed_at: datetime | None
+
+    created_at: datetime
+    updated_at: datetime
+
+
+# ============================================================================
+# MODERATION CLAIM RESPONSE
+# ============================================================================
+
+
+class ModerationClaimResponse(BaseModel):
+    """
+    API representation of a claim for moderator/administrator
+    moderation endpoints.
+
+    Moderators need enough identity information to distinguish
+    claimants during review, but do not need private profile data.
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    id: int
+    item_id: int
+    claimant_id: int
+    claimant: ClaimantModerationIdentity
 
     item: ClaimItemSummary
 

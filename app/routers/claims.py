@@ -24,6 +24,7 @@ from app.schemas.claim import (
     ClaimCreate,
     ClaimReject,
     ClaimResponse,
+    ModerationClaimResponse,
 )
 from app.services.claim import (
     approve_claim,
@@ -229,7 +230,7 @@ def withdraw_claim_endpoint(
 
 @router.get(
     "/admin/pending",
-    response_model=list[ClaimResponse],
+    response_model=list[ModerationClaimResponse],
     summary="List pending claims for moderation",
 )
 def list_pending_claims_endpoint(
@@ -240,6 +241,9 @@ def list_pending_claims_endpoint(
     Return pending claims awaiting moderation.
 
     Both moderators and administrators are authorized.
+
+    Moderation responses expose only the claimant's ID and
+    username. Private profile and contact information is not exposed.
     """
 
     return list_pending_claims(db)
@@ -252,7 +256,7 @@ def list_pending_claims_endpoint(
 
 @router.patch(
     "/admin/{claim_id}/approve",
-    response_model=ClaimResponse,
+    response_model=ModerationClaimResponse,
     summary="Approve a pending claim",
 )
 def approve_claim_endpoint(
@@ -264,6 +268,9 @@ def approve_claim_endpoint(
     Approve a pending claim.
 
     Both moderators and administrators are authorized.
+
+    Moderation responses expose only the claimant's ID and
+    username. Private profile and contact information is not exposed.
     """
 
     claim = get_claim(
@@ -284,6 +291,12 @@ def approve_claim_endpoint(
             reviewer_id=current_moderator.id,
         )
 
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
+
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -298,7 +311,7 @@ def approve_claim_endpoint(
 
 @router.patch(
     "/admin/{claim_id}/reject",
-    response_model=ClaimResponse,
+    response_model=ModerationClaimResponse,
     summary="Reject a pending claim",
 )
 def reject_claim_endpoint(
@@ -312,6 +325,9 @@ def reject_claim_endpoint(
 
     Both moderators and administrators are authorized.
     A rejection reason is required.
+
+    Moderation responses expose only the claimant's ID and
+    username. Private profile and contact information is not exposed.
     """
 
     claim = get_claim(
@@ -332,6 +348,12 @@ def reject_claim_endpoint(
             reviewer_id=current_moderator.id,
             rejection_reason=payload.rejection_reason,
         )
+
+    except PermissionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=str(exc),
+        ) from exc
 
     except ValueError as exc:
         raise HTTPException(

@@ -863,6 +863,29 @@ def test_withdraw_report_creates_audit_log(db):
 # ============================================================================
 
 
+def test_reporter_cannot_review_own_report(db):
+    """
+    A reporter must not be able to review their own report,
+    even when acting as a moderator or administrator.
+    """
+
+    _, report = create_test_report(db)
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own report",
+    ):
+        review_report(
+            db,
+            report=report,
+            reviewer_id=TEST_REPORTER_ID,
+        )
+
+    assert report.status == REPORT_STATUS_PENDING
+    assert report.reviewed_by is None
+    assert report.reviewed_at is None
+
+
 def test_pending_report_can_be_reviewed(db):
     """
     A pending report can transition to reviewed.
@@ -946,6 +969,43 @@ def test_resolved_report_cannot_be_reviewed(db):
 # ============================================================================
 # RESOLVE REPORT
 # ============================================================================
+
+
+def test_reporter_cannot_resolve_own_report(db):
+    """
+    A reporter must not be able to resolve their own report,
+    even when the report has already been reviewed by another
+    moderator or administrator.
+    """
+
+    _, report = create_test_report(db)
+
+    reviewer = create_test_reviewer(db)
+
+    review_report(
+        db,
+        report=report,
+        reviewer_id=reviewer.id,
+    )
+
+    reviewed_at = report.reviewed_at
+    reviewed_by = report.reviewed_by
+
+    with pytest.raises(
+        PermissionError,
+        match="cannot moderate your own report",
+    ):
+        resolve_report(
+            db,
+            report=report,
+            reviewer_id=TEST_REPORTER_ID,
+            resolution_note="This resolution must not be allowed.",
+        )
+
+    assert report.status == REPORT_STATUS_REVIEWED
+    assert report.reviewed_by == reviewed_by
+    assert report.reviewed_at == reviewed_at
+    assert report.resolution_note is None
 
 
 def test_reviewed_report_can_be_resolved(db):

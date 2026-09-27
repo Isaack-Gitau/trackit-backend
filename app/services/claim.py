@@ -26,6 +26,7 @@ Security principles:
 - Duplicate active claims are prevented.
 - Only pending claims may be reviewed or withdrawn.
 - Rejection requires a reason.
+- Moderators and administrators cannot review their own claims.
 - Security-relevant actions are audited.
 - Claim lifecycle events generate user notifications.
 """
@@ -361,6 +362,7 @@ def approve_claim(
     Business rules:
 
     - Only pending claims can be approved.
+    - A claimant cannot approve their own claim.
     - An item may have only one approved claim.
     - Once a claim is approved, the associated item becomes claimed.
     - The claimant receives a notification.
@@ -370,6 +372,7 @@ def approve_claim(
 
     - The claim row is locked first.
     - The claim status is re-checked after acquiring the lock.
+    - The self-moderation rule is checked after acquiring the lock.
     - The associated item row is locked second.
     - This serializes concurrent approval attempts for the same claim
       and competing approval attempts for the same item.
@@ -390,6 +393,11 @@ def approve_claim(
     if claim.status != CLAIM_STATUS_PENDING:
         raise ValueError(
             "Only pending claims can be approved."
+        )
+
+    if claim.claimant_id == reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own claim."
         )
 
     locked_item = get_item_by_id_for_update(
@@ -484,6 +492,8 @@ def reject_claim(
 
     A rejection reason is mandatory for accountability.
 
+    Moderators and administrators cannot reject their own claims.
+
     The claimant receives a notification containing the rejection
     reason.
 
@@ -494,6 +504,11 @@ def reject_claim(
     if claim.status != CLAIM_STATUS_PENDING:
         raise ValueError(
             "Only pending claims can be rejected."
+        )
+
+    if claim.claimant_id == reviewer_id:
+        raise PermissionError(
+            "You cannot moderate your own claim."
         )
 
     normalized_reason = rejection_reason.strip()

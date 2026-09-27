@@ -870,7 +870,15 @@ def test_moderator_can_approve_claim(
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "approved"
+
+    response_data = response.json()
+
+    assert response_data["status"] == "approved"
+    assert response_data["claimant_id"] == claimant.id
+    assert response_data["claimant"] == {
+        "id": claimant.id,
+        "username": claimant.username,
+    }
 
 
 def test_moderator_can_list_pending_claims(
@@ -920,12 +928,26 @@ def test_moderator_can_list_pending_claims(
 
     assert response.status_code == 200
 
+    claims = response.json()
+
     claim_ids = {
         claim["id"]
-        for claim in response.json()
+        for claim in claims
     }
 
     assert claim_id in claim_ids
+
+    pending_claim = next(
+        claim
+        for claim in claims
+        if claim["id"] == claim_id
+    )
+
+    assert pending_claim["claimant_id"] == claimant.id
+    assert pending_claim["claimant"] == {
+        "id": claimant.id,
+        "username": claimant.username,
+    }
 
 
 def test_moderator_can_reject_pending_claim(
@@ -977,11 +999,18 @@ def test_moderator_can_reject_pending_claim(
     )
 
     assert response.status_code == 200
-    assert response.json()["status"] == "rejected"
-    assert (
-        response.json()["rejection_reason"]
-        == "Insufficient proof of ownership."
+
+    response_data = response.json()
+
+    assert response_data["status"] == "rejected"
+    assert response_data["rejection_reason"] == (
+        "Insufficient proof of ownership."
     )
+    assert response_data["claimant_id"] == claimant.id
+    assert response_data["claimant"] == {
+        "id": claimant.id,
+        "username": claimant.username,
+    }
 
 
 # ============================================================================

@@ -1346,6 +1346,47 @@ def test_admin_can_delete_any_comment(
     assert db.get(Comment, comment_id) is None
 
 
+def test_moderator_cannot_delete_own_comment(
+    client,
+    db,
+):
+    owner = create_user(
+        db,
+        user_id=2070,
+        username="commentowner32",
+    )
+
+    moderator = create_user(
+        db,
+        user_id=2071,
+        username="commentmoderator32",
+        role="moderator",
+    )
+
+    item = create_item(
+        db,
+        owner_id=owner.id,
+    )
+
+    comment = create_comment(
+        db,
+        item_id=item.id,
+        user_id=moderator.id,
+        content="Comment that moderator must not remove.",
+    )
+
+    response = client.delete(
+        f"/api/admin/comments/{comment.id}",
+        headers=auth_headers(moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.expire_all()
+
+    assert db.get(Comment, comment.id) is not None
+
+
 def test_regular_user_cannot_use_admin_comment_delete(
     client,
     db,

@@ -460,6 +460,11 @@ def admin_delete_comment(
         "admin_id",
     )
 
+    if comment.user_id == admin_id:
+        raise PermissionError(
+            "You cannot moderate your own comment."
+        )
+
     comment_id = comment.id
 
     repository_delete_comment(

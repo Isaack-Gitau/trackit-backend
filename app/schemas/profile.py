@@ -146,6 +146,11 @@ class ProfilePrivacyUpdate(BaseModel):
             "on their public profile."
         ),
     )
+
+
+# -----------------------------------------------------------------------------
+
+
 class PublicProfileResponse(BaseModel):
     """
     Public profile information visible to other authenticated users.
@@ -160,16 +165,25 @@ class PublicProfileResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+
     username: str
+
     profile_picture: str | None = None
+
     bio: str | None = None
+
     first_name: str | None = None
+
     last_name: str | None = None
+
     email: str | None = None
+
     phone_number: str | None = None
+
     social_links: dict[str, object] = Field(
         default_factory=dict
     )
+
 
 # ============================================================================
 # PROFILE RESPONSE
@@ -310,6 +324,76 @@ class AdminUserDetailResponse(BaseModel):
     created_at: datetime
 
     updated_at: datetime
+
+
+# ============================================================================
+# MODERATION USER DETAIL RESPONSE
+# ============================================================================
+
+
+class ModerationUserDetailResponse(BaseModel):
+    """
+    Minimal user representation for moderation inspection.
+
+    This schema is intended for moderator/admin visibility where
+    identifying the account and understanding its moderation-relevant
+    status are necessary.
+
+    It deliberately excludes private profile and personal-contact
+    information such as:
+
+    - first_name
+    - last_name
+    - email
+    - profile_picture
+    - phone_number
+    - bio
+    - address
+    - social_links
+    - preferences
+
+    It also excludes authentication and security fields such as:
+
+    - password_changed_at
+    - password_hash
+    - token_version
+    - authentication tokens
+    - password reset tokens
+    - email verification tokens
+    - session credentials
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    # ========================================================================
+    # MODERATION IDENTITY
+    # ========================================================================
+
+    id: int
+
+    username: str
+
+    # ========================================================================
+    # ACCOUNT STATUS
+    # ========================================================================
+
+    role: str
+
+    is_active: bool
+
+    is_verified: bool
+
+    # ------------------------------------------------------------------------
+    # DEACTIVATION STATUS
+    # ------------------------------------------------------------------------
+
+    deactivated_at: datetime | None = None
+
+    deactivated_until: datetime | None = None
+
+    deactivation_reason: str | None = None
 
 
 # ============================================================================
