@@ -69,6 +69,7 @@ from fastapi import (
     Body,
     Depends,
     File,
+    Query,
     HTTPException,
     UploadFile,
     status,
@@ -89,6 +90,7 @@ from app.schemas.profile import (
     AdminEmailRequest,
     AdminEmailResponse,
     AdminUserDetailResponse,
+    AdminUserListResponse,
     ModerationUserDetailResponse,
     ProfilePrivacyResponse,
     ProfilePrivacyUpdate,
@@ -109,6 +111,7 @@ from app.services.user import (
     demote_admin_to_moderator_service,
     get_public_user_profile_service,
     get_user,
+    list_users_for_admin,
     promote_moderator_to_admin_service,
     promote_user_to_moderator_service,
     revoke_moderator_service,
@@ -724,6 +727,70 @@ async def send_admin_email(
         results=response_results,
     )
 
+
+# ============================================================================
+# ADMIN ONLY: USER DIRECTORY
+# ============================================================================
+
+
+@router.get(
+    "/admin/users",
+    response_model=AdminUserListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List users for administration",
+)
+def list_admin_users(
+    search: str | None = None,
+    role: str | None = None,
+    status_filter: str | None = Query(
+        default=None,
+        alias="status",
+    ),
+    page: int = 1,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminUserListResponse:
+    """
+    Return a paginated user directory for administrators.
+
+    Administrators may search by username, first name, last name,
+    or email and filter by role and account status.
+
+    Only security-safe administrative directory fields are returned.
+    Authentication secrets and other sensitive security fields are
+    never included.
+    """
+
+    try:
+        users, total = list_users_for_admin(
+            db,
+            search=search,
+            role=role,
+            status=status_filter,
+            page=page,
+            limit=limit,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    pages = (
+        (total + limit - 1) // limit
+        if total > 0
+        else 0
+    )
+
+    return AdminUserListResponse(
+        items=users,
+        page=page,
+        limit=limit,
+        total=total,
+        pages=pages,
+    )
 
 # ============================================================================
 # MODERATOR + ADMIN: GET USER DETAIL

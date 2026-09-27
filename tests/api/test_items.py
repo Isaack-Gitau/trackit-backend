@@ -1385,6 +1385,94 @@ def test_moderator_can_reject_pending_item(
     )
 
 
+
+def test_moderator_cannot_approve_own_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A moderator cannot approve their own item.
+    The API must return 403 rather than an internal server error.
+    """
+
+    moderator = create_test_user(
+        db,
+        user_id=2059,
+        username="selfapprove_moderator",
+        email="selfapprove_moderator@example.com",
+        role="moderator",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3059,
+        user_id=moderator.id,
+        item_status="pending",
+    )
+
+    response = client.patch(
+        f"/api/items/{item.id}/approve",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You cannot moderate your own item."
+    )
+
+    db.refresh(item)
+
+    assert item.status == "pending"
+    assert item.reviewed_by is None
+    assert item.reviewed_at is None
+    assert item.rejection_reason is None
+
+
+def test_moderator_cannot_reject_own_item(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A moderator cannot reject their own item.
+    The API must return 403 rather than an internal server error.
+    """
+
+    moderator = create_test_user(
+        db,
+        user_id=2060,
+        username="selfreject_moderator",
+        email="selfreject_moderator@example.com",
+        role="moderator",
+    )
+
+    item = create_test_item(
+        db,
+        item_id=3060,
+        user_id=moderator.id,
+        item_status="pending",
+    )
+
+    response = client.patch(
+        f"/api/items/{item.id}/reject",
+        headers=authenticated_headers(moderator),
+        json={
+            "reason": "This moderation action should be rejected.",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "You cannot moderate your own item."
+    )
+
+    db.refresh(item)
+
+    assert item.status == "pending"
+    assert item.reviewed_by is None
+    assert item.reviewed_at is None
+    assert item.rejection_reason is None
+
+
 def test_non_admin_cannot_reject_item(
     client: TestClient,
     db: Session,

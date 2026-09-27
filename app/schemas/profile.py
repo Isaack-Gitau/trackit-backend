@@ -598,6 +598,99 @@ class AdminEmailDeliveryResult(BaseModel):
 
 
 # ============================================================================
+# ADMIN USER DIRECTORY
+# ============================================================================
+
+
+class AdminUserListItem(BaseModel):
+    """
+    Security-safe user representation for the administrator
+    user directory.
+
+    This schema contains the account information needed for
+    searching, filtering, selecting, and inspecting users from
+    the administrative interface.
+
+    It intentionally excludes security-sensitive fields such as:
+
+    - password_hash
+    - token_version
+    - password_changed_at
+    - authentication tokens
+    - password reset tokens
+    - email verification tokens
+    - session credentials
+    """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
+
+    # ========================================================================
+    # ACCOUNT IDENTITY
+    # ========================================================================
+
+    id: int
+
+    username: str
+
+    first_name: str
+
+    last_name: str
+
+    email: str
+
+    # ========================================================================
+    # ACCOUNT STATUS
+    # ========================================================================
+
+    role: str
+
+    is_active: bool
+
+    is_verified: bool
+
+    deactivated_at: datetime | None = None
+
+    deactivated_until: datetime | None = None
+
+    deactivation_reason: str | None = None
+
+    # ========================================================================
+    # ACCOUNT TIMESTAMPS
+    # ========================================================================
+
+    created_at: datetime
+
+
+# -----------------------------------------------------------------------------
+
+
+class AdminUserListResponse(BaseModel):
+    """
+    Paginated administrator user-directory response.
+
+    `items` contains only the users for the requested page.
+
+    `total` represents the complete number of users matching
+    the supplied filters.
+
+    `pages` represents the total number of available pages
+    using the requested page size.
+    """
+
+    items: list[AdminUserListItem]
+
+    page: int
+
+    limit: int
+
+    total: int
+
+    pages: int
+
+
+# ============================================================================
 # ADMIN CUSTOM EMAIL RESPONSE
 # ============================================================================
 

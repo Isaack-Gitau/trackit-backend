@@ -1963,6 +1963,456 @@ def test_normal_user_cannot_view_admin_user_profile(
     assert response.status_code == 403
 
 
+def test_admin_can_list_users(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can retrieve the paginated user directory.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3010,
+        username="directoryadmin",
+        email="directoryadmin@example.com",
+    )
+
+    user_one = create_test_user(
+        db,
+        user_id=3011,
+        username="directoryuserone",
+        email="directoryone@example.com",
+        first_name="Directory",
+        last_name="One",
+    )
+
+    user_two = create_test_user(
+        db,
+        user_id=3012,
+        username="directoryusertwo",
+        email="directorytwo@example.com",
+        first_name="Directory",
+        last_name="Two",
+    )
+
+    db.commit()
+
+    response = client.get(
+        "/api/profile/admin/users",
+        params={"search": "directoryuser"},
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["page"] == 1
+    assert data["limit"] == 20
+    assert data["total"] == 2
+    assert data["pages"] == 1
+
+    returned_ids = {
+        item["id"]
+        for item in data["items"]
+    }
+
+    assert returned_ids == {
+        user_one.id,
+        user_two.id,
+    }
+
+
+def test_admin_user_directory_requires_admin_role(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators and normal users cannot access the admin user directory.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=3013,
+        username="directorymoderator",
+        email="directorymoderator@example.com",
+    )
+
+    normal_user = create_test_user(
+        db,
+        user_id=3014,
+        username="directorynormal",
+        email="directorynormal@example.com",
+    )
+
+    moderator_response = client.get(
+        "/api/profile/admin/users",
+        headers=authenticated_headers(moderator),
+    )
+
+    normal_response = client.get(
+        "/api/profile/admin/users",
+        headers=authenticated_headers(normal_user),
+    )
+
+    assert moderator_response.status_code == 403
+    assert normal_response.status_code == 403
+
+
+def test_admin_user_directory_searches_username_name_and_email(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Directory search matches username, first name, last name, or email.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3015,
+        username="searchdirectoryadmin",
+        email="searchdirectoryadmin@example.com",
+    )
+
+    username_user = create_test_user(
+        db,
+        user_id=3016,
+        username="uniqueusername",
+        email="ordinary-one@example.com",
+        first_name="First",
+        last_name="Person",
+    )
+
+    first_name_user = create_test_user(
+        db,
+        user_id=3017,
+        username="ordinaryuser",
+        email="ordinary-two@example.com",
+        first_name="UniqueFirstName",
+        last_name="Person",
+    )
+
+    last_name_user = create_test_user(
+        db,
+        user_id=3018,
+        username="anotheruser",
+        email="ordinary-three@example.com",
+        first_name="Another",
+        last_name="UniqueLastName",
+    )
+
+    email_user = create_test_user(
+        db,
+        user_id=3019,
+        username="emailmatchuser",
+        email="unique-email@example.com",
+        first_name="Email",
+        last_name="Person",
+    )
+
+    db.commit()
+
+    search_cases = [
+        ("uniqueusername", username_user.id),
+        ("uniquefirstname", first_name_user.id),
+        ("uniquelastname", last_name_user.id),
+        ("unique-email@example.com", email_user.id),
+    ]
+
+    for search_term, expected_id in search_cases:
+        response = client.get(
+            "/api/profile/admin/users",
+            params={"search": search_term},
+            headers=authenticated_headers(admin),
+        )
+
+        assert response.status_code == 200
+
+        data = response.json()
+
+        assert data["total"] == 1
+        assert data["pages"] == 1
+        assert data["items"][0]["id"] == expected_id
+
+
+def test_admin_user_directory_filters_by_role_and_status(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrators can filter the directory by role and account status.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3020,
+        username="filterdirectoryadmin",
+        email="filterdirectoryadmin@example.com",
+    )
+
+    moderator = create_moderator(
+        db,
+        user_id=3021,
+        username="filtermoderator",
+        email="filtermoderator@example.com",
+    )
+
+    active_user = create_test_user(
+        db,
+        user_id=3022,
+        username="filteractiveuser",
+        email="filteractive@example.com",
+    )
+
+    inactive_user = create_test_user(
+        db,
+        user_id=3023,
+        username="filterinactiveuser",
+        email="filterinactive@example.com",
+    )
+
+    inactive_user.is_active = False
+    inactive_user.deactivated_at = datetime.now(timezone.utc)
+    inactive_user.deactivated_until = (
+        datetime.now(timezone.utc) + timedelta(hours=24)
+    )
+    inactive_user.deactivation_reason = "Test inactivity."
+
+    db.commit()
+
+    role_response = client.get(
+        "/api/profile/admin/users",
+        params={"role": "moderator"},
+        headers=authenticated_headers(admin),
+    )
+
+    assert role_response.status_code == 200
+
+    role_data = role_response.json()
+
+    assert role_data["total"] == 1
+    assert role_data["items"][0]["id"] == moderator.id
+    assert role_data["items"][0]["role"] == UserRole.MODERATOR
+
+    active_response = client.get(
+        "/api/profile/admin/users",
+        params={
+            "search": "filter",
+            "status": "active",
+        },
+        headers=authenticated_headers(admin),
+    )
+
+    assert active_response.status_code == 200
+
+    active_data = active_response.json()
+
+    assert active_data["total"] == 3
+    assert all(
+        item["is_active"] is True
+        for item in active_data["items"]
+    )
+
+    inactive_response = client.get(
+        "/api/profile/admin/users",
+        params={
+            "search": "filter",
+            "status": "inactive",
+        },
+        headers=authenticated_headers(admin),
+    )
+
+    assert inactive_response.status_code == 200
+
+    inactive_data = inactive_response.json()
+
+    assert inactive_data["total"] == 1
+    assert inactive_data["items"][0]["id"] == inactive_user.id
+    assert inactive_data["items"][0]["is_active"] is False
+
+
+def test_admin_user_directory_pagination_metadata(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Directory pagination returns the requested page metadata and totals.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3024,
+        username="paginationadmin",
+        email="paginationadmin@example.com",
+    )
+
+    for user_id in range(3025, 3030):
+        create_test_user(
+            db,
+            user_id=user_id,
+            username=f"paginationuser{user_id}",
+            email=f"pagination{user_id}@example.com",
+        )
+
+    db.commit()
+
+    first_page = client.get(
+        "/api/profile/admin/users",
+        params={
+            "search": "paginationuser",
+            "page": 1,
+            "limit": 2,
+        },
+        headers=authenticated_headers(admin),
+    )
+
+    assert first_page.status_code == 200
+
+    first_data = first_page.json()
+
+    assert first_data["page"] == 1
+    assert first_data["limit"] == 2
+    assert first_data["total"] == 5
+    assert first_data["pages"] == 3
+    assert len(first_data["items"]) == 2
+
+    second_page = client.get(
+        "/api/profile/admin/users",
+        params={
+            "search": "paginationuser",
+            "page": 2,
+            "limit": 2,
+        },
+        headers=authenticated_headers(admin),
+    )
+
+    assert second_page.status_code == 200
+
+    second_data = second_page.json()
+
+    assert second_data["page"] == 2
+    assert second_data["limit"] == 2
+    assert second_data["total"] == 5
+    assert second_data["pages"] == 3
+    assert len(second_data["items"]) == 2
+
+    first_ids = {
+        item["id"]
+        for item in first_data["items"]
+    }
+    second_ids = {
+        item["id"]
+        for item in second_data["items"]
+    }
+
+    assert first_ids.isdisjoint(second_ids)
+
+
+def test_admin_user_directory_excludes_security_fields(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Directory responses do not expose authentication or security internals.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3030,
+        username="securitydirectoryadmin",
+        email="securitydirectoryadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3031,
+        username="securitydirectorytarget",
+        email="securitydirectorytarget@example.com",
+    )
+
+    target_user.password_changed_at = datetime.now(timezone.utc)
+
+    db.commit()
+
+    response = client.get(
+        "/api/profile/admin/users",
+        params={"search": target_user.username},
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["total"] == 1
+
+    item = data["items"][0]
+
+    expected_fields = {
+        "id",
+        "username",
+        "first_name",
+        "last_name",
+        "email",
+        "role",
+        "is_active",
+        "is_verified",
+        "deactivated_at",
+        "deactivated_until",
+        "deactivation_reason",
+        "created_at",
+    }
+
+    assert set(item) == expected_fields
+
+    forbidden_fields = {
+        "password_hash",
+        "token_version",
+        "password_changed_at",
+        "verification_token",
+        "password_reset_token",
+    }
+
+    assert forbidden_fields.isdisjoint(item)
+
+
+def test_admin_user_directory_rejects_invalid_filters(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Invalid role, status, page, and limit values are rejected.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3032,
+        username="invalidfilteradmin",
+        email="invalidfilteradmin@example.com",
+    )
+
+    invalid_requests = [
+        {"role": "super_admin"},
+        {"status": "suspended"},
+        {"page": 0},
+        {"limit": 0},
+        {"limit": 101},
+    ]
+
+    for params in invalid_requests:
+        response = client.get(
+            "/api/profile/admin/users",
+            params=params,
+            headers=authenticated_headers(admin),
+        )
+
+        assert response.status_code == 400, (
+            f"Expected 400 for params={params}, "
+            f"got {response.status_code}: {response.text}"
+        )
+
+
 def test_admin_user_profile_requires_authentication(
     client: TestClient,
     db: Session,

@@ -11,6 +11,7 @@ Responsibilities:
 - Retrieve users by login identifier.
 - Check username/email availability.
 - Create users.
+- List and count users for administrative directory workflows.
 - Update authenticated-user profile fields.
 - Collect user-owned media storage keys.
 - Delete users.
@@ -31,6 +32,7 @@ from sqlalchemy.orm import Session
 from app.core.constants import UserRole
 from app.models.item import Item
 from app.models.user import User
+
 
 # ============================================================================
 # PROFILE UPDATE FIELDS
@@ -111,7 +113,9 @@ def get_users_by_ids(
         result.scalars().all()
     )
 
-#------------------------------------------------------------------------------------
+
+# -----------------------------------------------------------------------------
+
 
 def get_user_by_username(
     db: Session,
@@ -265,6 +269,153 @@ def create_user(
     db.refresh(user)
 
     return user
+
+
+# ============================================================================
+# ADMINISTRATIVE USER DIRECTORY
+# ============================================================================
+
+
+def get_users(
+    db: Session,
+    *,
+    search: str | None = None,
+    role: str | None = None,
+    is_active: bool | None = None,
+    offset: int = 0,
+    limit: int = 20,
+) -> list[User]:
+    """
+    Retrieve a filtered page of users for the administrative directory.
+
+    Database access only. Validation of search values, roles, page
+    numbers, and limits belongs in the service/API layers.
+
+    Args:
+        db:
+            Active SQLAlchemy session.
+
+        search:
+            Optional case-insensitive search across username,
+            first name, last name, and email.
+
+        role:
+            Optional exact role filter.
+
+        is_active:
+            Optional account-status filter.
+
+        offset:
+            Number of matching records to skip.
+
+        limit:
+            Maximum number of records to return.
+
+    Returns:
+        Users matching the supplied filters, ordered by newest
+        account first with user ID as a deterministic tie-breaker.
+    """
+
+    query = select(User)
+
+    filters = []
+
+    if search:
+        search_pattern = f"%{search}%"
+
+        filters.append(
+            or_(
+                User.username.ilike(search_pattern),
+                User.first_name.ilike(search_pattern),
+                User.last_name.ilike(search_pattern),
+                User.email.ilike(search_pattern),
+            )
+        )
+
+    if role is not None:
+        filters.append(
+            User.role == role
+        )
+
+    if is_active is not None:
+        filters.append(
+            User.is_active.is_(is_active)
+        )
+
+    if filters:
+        query = query.where(*filters)
+
+    query = (
+        query
+        .order_by(
+            User.created_at.desc(),
+            User.id.desc(),
+        )
+        .offset(offset)
+        .limit(limit)
+    )
+
+    result = db.execute(query)
+
+    return list(
+        result.scalars().all()
+    )
+
+
+# -----------------------------------------------------------------------------
+
+
+def count_users(
+    db: Session,
+    *,
+    search: str | None = None,
+    role: str | None = None,
+    is_active: bool | None = None,
+) -> int:
+    """
+    Count users matching the administrative directory filters.
+
+    The filtering rules intentionally mirror ``get_users()`` so the
+    returned total represents the same population as the paginated
+    directory query.
+    """
+
+    query = select(
+        func.count(User.id)
+    )
+
+    filters = []
+
+    if search:
+        search_pattern = f"%{search}%"
+
+        filters.append(
+            or_(
+                User.username.ilike(search_pattern),
+                User.first_name.ilike(search_pattern),
+                User.last_name.ilike(search_pattern),
+                User.email.ilike(search_pattern),
+            )
+        )
+
+    if role is not None:
+        filters.append(
+            User.role == role
+        )
+
+    if is_active is not None:
+        filters.append(
+            User.is_active.is_(is_active)
+        )
+
+    if filters:
+        query = query.where(*filters)
+
+    result = db.execute(query)
+
+    return int(
+        result.scalar_one()
+    )
 
 
 # ============================================================================

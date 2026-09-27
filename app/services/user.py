@@ -39,6 +39,7 @@ from app.core.security import hash_password, verify_password
 from app.models.user import User
 from app.repositories.users import (
     count_active_users_by_role,
+    count_users,
     count_users_by_role,
     create_user,
     delete_user,
@@ -51,6 +52,7 @@ from app.repositories.users import (
     get_user_by_username,
     get_user_by_username_excluding_id,
     get_user_media_storage_keys,
+    get_users,
     promote_moderator_to_admin,
     promote_user_to_moderator,
     revoke_moderator,
@@ -239,6 +241,126 @@ def get_user_by_login_service(
         db,
         login,
     )
+
+def list_users_for_admin(
+    db: Session,
+    *,
+    search: str | None = None,
+    role: str | None = None,
+    status: str | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[list[User], int]:
+    """
+    Retrieve a paginated administrative user directory.
+
+    Business rules:
+
+    - Page numbers start at 1.
+    - Limits must be between 1 and 100.
+    - Search is case-insensitive and covers username, first name,
+      last name, and email.
+    - Role may be user, moderator, or admin.
+    - Status may be active or inactive.
+    - Blank search values are treated as no search filter.
+    - The returned total represents the complete filtered population,
+      not just the current page.
+
+    The operation performs database reads only and does not modify
+    the transaction.
+
+    Returns:
+        A tuple containing:
+        - the users for the requested page;
+        - the total number of users matching the filters.
+    """
+
+    if not isinstance(page, int) or isinstance(page, bool):
+        raise ValueError(
+            "Page must be a whole number."
+        )
+
+    if page < 1:
+        raise ValueError(
+            "Page must be at least 1."
+        )
+
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(
+            "Limit must be a whole number."
+        )
+
+    if limit < 1:
+        raise ValueError(
+            "Limit must be at least 1."
+        )
+
+    if limit > 100:
+        raise ValueError(
+            "Limit cannot exceed 100."
+        )
+
+    normalized_search = (
+        search.strip()
+        if search is not None
+        else None
+    )
+
+    if normalized_search == "":
+        normalized_search = None
+
+    valid_roles = {
+        UserRole.USER,
+        UserRole.MODERATOR,
+        UserRole.ADMIN,
+    }
+
+    if role is not None:
+        role = role.strip().lower()
+
+        if role not in valid_roles:
+            raise ValueError(
+                "Invalid user role."
+            )
+
+    if status is not None:
+        status = status.strip().lower()
+
+        if status not in {
+            "active",
+            "inactive",
+        }:
+            raise ValueError(
+                "Invalid account status."
+            )
+
+    is_active: bool | None = None
+
+    if status == "active":
+        is_active = True
+    elif status == "inactive":
+        is_active = False
+
+    offset = (page - 1) * limit
+
+    users = get_users(
+        db,
+        search=normalized_search,
+        role=role,
+        is_active=is_active,
+        offset=offset,
+        limit=limit,
+    )
+
+    total = count_users(
+        db,
+        search=normalized_search,
+        role=role,
+        is_active=is_active,
+    )
+
+    return users, total
+
 
 
 # ============================================================================
