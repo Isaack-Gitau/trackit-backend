@@ -86,6 +86,8 @@ from app.db.dependencies import get_db
 from app.core.constants import UserRole
 from app.models.user import User
 from app.schemas.profile import (
+    AdminAuditLogListResponse,
+    AdminAuditLogResponse,
     AdminEmailDeliveryResult,
     AdminEmailRequest,
     AdminEmailResponse,
@@ -103,6 +105,7 @@ from app.services.admin_email import send_admin_email_to_users
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
+    list_audit_logs_for_admin,
 )
 from app.services.user import (
     activate_suspended_user,
@@ -791,6 +794,98 @@ def list_admin_users(
         total=total,
         pages=pages,
     )
+
+# ============================================================================
+# ADMIN ONLY: AUDIT LOGS
+# ============================================================================
+
+
+@router.get(
+    "/admin/audit-logs",
+    response_model=AdminAuditLogListResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List audit logs",
+)
+def list_admin_audit_logs(
+    action: str | None = None,
+    success: bool | None = None,
+    user_id: int | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    page: int = 1,
+    limit: int = 20,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminAuditLogListResponse:
+    """
+    Return a paginated audit-log listing for administrators.
+
+    Administrators may filter audit events by action, success state,
+    acting user, resource type, and resource ID.
+
+    Only the security-safe audit representation is returned.
+
+    IP addresses and user-agent strings are intentionally excluded
+    from the administrative response.
+
+    Automated events may have no actor because they are generated
+    by the system rather than an authenticated user.
+    """
+
+    try:
+        logs, total = list_audit_logs_for_admin(
+            db,
+            action=action,
+            success=success,
+            user_id=user_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            page=page,
+            limit=limit,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    items = [
+        AdminAuditLogResponse(
+            id=log.id,
+            action=log.action,
+            success=log.success,
+            details=log.details,
+            resource_type=log.resource_type,
+            resource_id=log.resource_id,
+            user_id=log.user_id,
+            actor=(
+                {
+                    "id": log.user.id,
+                    "username": log.user.username,
+                }
+                if log.user is not None
+                else None
+            ),
+            created_at=log.created_at,
+        )
+        for log in logs
+    ]
+
+    pages = (
+        (total + limit - 1) // limit
+        if total > 0
+        else 0
+    )
+
+    return AdminAuditLogListResponse(
+        items=items,
+        page=page,
+        limit=limit,
+        total=total,
+        pages=pages,
+    )
+
 
 # ============================================================================
 # MODERATOR + ADMIN: GET USER DETAIL

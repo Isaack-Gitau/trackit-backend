@@ -1,7 +1,8 @@
 """
 TRACKIT Audit Logging Service.
 
-Provides centralized creation of security and system audit logs.
+Provides centralized creation and administrative listing of
+security and system audit logs.
 
 Security principles:
 
@@ -12,11 +13,17 @@ Security principles:
 - Never store authentication secrets.
 - Keep audit records structured and consistent.
 - Support anonymous events where no user is authenticated.
+- Administrative listing does not expose IP addresses or user-agent
+  strings through the normal audit-log response.
 """
 
 from sqlalchemy.orm import Session
 
 from app.models.audit_log import AuditLog
+from app.repositories.audit_logs import (
+    count_audit_logs,
+    get_audit_logs,
+)
 
 
 # ============================================================================
@@ -147,3 +154,149 @@ def create_audit_log(
     db.flush()
 
     return audit_log
+
+
+# ============================================================================
+# LIST AUDIT LOGS
+# ============================================================================
+
+
+def list_audit_logs_for_admin(
+    db: Session,
+    *,
+    action: str | None = None,
+    success: bool | None = None,
+    user_id: int | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    page: int = 1,
+    limit: int = 20,
+) -> tuple[list[AuditLog], int]:
+    """
+    Retrieve a paginated administrative audit-log listing.
+
+    Business rules:
+
+    - Page numbers start at 1.
+    - Limits must be between 1 and 100.
+    - Action values are limited to the AuditLog action column size.
+    - Resource types are limited to the AuditLog resource_type size.
+    - User IDs and resource IDs must be positive when supplied.
+    - Blank action/resource-type values are treated as no filter.
+    - The returned total represents the complete filtered population,
+      not just the current page.
+
+    The operation performs database reads only and does not modify
+    the transaction.
+    """
+
+    if not isinstance(page, int) or isinstance(page, bool):
+        raise ValueError(
+            "Page must be a whole number."
+        )
+
+    if page < 1:
+        raise ValueError(
+            "Page must be at least 1."
+        )
+
+    if not isinstance(limit, int) or isinstance(limit, bool):
+        raise ValueError(
+            "Limit must be a whole number."
+        )
+
+    if limit < 1:
+        raise ValueError(
+            "Limit must be at least 1."
+        )
+
+    if limit > 100:
+        raise ValueError(
+            "Limit cannot exceed 100."
+        )
+
+    normalized_action = (
+        action.strip()
+        if action is not None
+        else None
+    )
+
+    if normalized_action == "":
+        normalized_action = None
+
+    if (
+        normalized_action is not None
+        and len(normalized_action) > 100
+    ):
+        raise ValueError(
+            "Audit action cannot exceed 100 characters."
+        )
+
+    normalized_resource_type = (
+        resource_type.strip()
+        if resource_type is not None
+        else None
+    )
+
+    if normalized_resource_type == "":
+        normalized_resource_type = None
+
+    if (
+        normalized_resource_type is not None
+        and len(normalized_resource_type) > 100
+    ):
+        raise ValueError(
+            "Resource type cannot exceed 100 characters."
+        )
+
+    if user_id is not None:
+        if (
+            not isinstance(user_id, int)
+            or isinstance(user_id, bool)
+        ):
+            raise ValueError(
+                "User ID must be a whole number."
+            )
+
+        if user_id < 1:
+            raise ValueError(
+                "User ID must be at least 1."
+            )
+
+    if resource_id is not None:
+        if (
+            not isinstance(resource_id, int)
+            or isinstance(resource_id, bool)
+        ):
+            raise ValueError(
+                "Resource ID must be a whole number."
+            )
+
+        if resource_id < 1:
+            raise ValueError(
+                "Resource ID must be at least 1."
+            )
+
+    offset = (page - 1) * limit
+
+    audit_logs = get_audit_logs(
+        db,
+        action=normalized_action,
+        success=success,
+        user_id=user_id,
+        resource_type=normalized_resource_type,
+        resource_id=resource_id,
+        offset=offset,
+        limit=limit,
+    )
+
+    total = count_audit_logs(
+        db,
+        action=normalized_action,
+        success=success,
+        user_id=user_id,
+        resource_type=normalized_resource_type,
+        resource_id=resource_id,
+    )
+
+    return audit_logs, total
