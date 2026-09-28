@@ -63,6 +63,7 @@ and its user-owned data.
 """
 
 import logging
+from datetime import datetime, timezone
 
 from fastapi import (
     APIRouter,
@@ -102,6 +103,10 @@ from app.schemas.profile import (
     UserSuspensionRequest,
 )
 from app.services.admin_email import send_admin_email_to_users
+from app.services.email import (
+    send_account_deactivation_email,
+    send_account_reactivation_email,
+)
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
@@ -1230,7 +1235,7 @@ def revoke_moderator(
     status_code=status.HTTP_200_OK,
     summary="Temporarily suspend a user account",
 )
-def deactivate_user(
+async def deactivate_user(
     user_id: int,
     suspension_data: UserSuspensionRequest,
     db: Session = Depends(get_db),
@@ -1256,6 +1261,10 @@ def deactivate_user(
     the account when the suspension period ends.
 
     Successful suspensions are recorded in the audit log.
+
+    A deactivation email is sent only after the database transaction
+    successfully commits. Email delivery failures are logged and do
+    not roll back an otherwise successful suspension.
     """
 
     target_user = get_user(
@@ -1290,15 +1299,48 @@ def deactivate_user(
             user_id=current_admin.id,
         )
 
-        return AdminUserDetailResponse.model_validate(
+        response = AdminUserDetailResponse.model_validate(
             suspended_user
         )
 
+        recipient = suspended_user.email
+        deactivated_at = suspended_user.deactivated_at
+        deactivated_until = suspended_user.deactivated_until
+        reason = suspended_user.deactivation_reason
+
+        if deactivated_at is None or deactivated_until is None:
+            raise RuntimeError(
+                "Suspended user is missing deactivation timestamps."
+            )
+
+        db.commit()
+
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+    try:
+        await send_account_deactivation_email(
+            recipient=recipient,
+            deactivated_at=deactivated_at,
+            deactivated_until=deactivated_until,
+            reason=reason,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send account deactivation email "
+            "for user_id=%s recipient=%s.",
+            suspended_user.id,
+            recipient,
+        )
+
+    return response
 
 
 # ============================================================================
@@ -1312,7 +1354,7 @@ def deactivate_user(
     status_code=status.HTTP_200_OK,
     summary="Reactivate a suspended user account",
 )
-def activate_user(
+async def activate_user(
     user_id: int,
     db: Session = Depends(get_db),
     current_admin: User = Depends(get_current_admin),
@@ -1328,6 +1370,10 @@ def activate_user(
     The user's role is preserved.
 
     Successful activations are recorded in the audit log.
+
+    A reactivation email is sent only after the database transaction
+    successfully commits. Email delivery failures are logged and do
+    not roll back an otherwise successful activation.
     """
 
     target_user = get_user(
@@ -1341,7 +1387,12 @@ def activate_user(
             detail="User not found.",
         )
 
+    recipient = target_user.email
+    reason = target_user.deactivation_reason
+
     try:
+        activated_at = datetime.now(timezone.utc)
+
         activated_user = activate_suspended_user(
             db,
             target_user,
@@ -1358,12 +1409,34 @@ def activate_user(
             user_id=current_admin.id,
         )
 
-        return AdminUserDetailResponse.model_validate(
+        response = AdminUserDetailResponse.model_validate(
             activated_user
         )
 
+        db.commit()
+
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+    try:
+        await send_account_reactivation_email(
+            recipient=recipient,
+            reactivated_at=activated_at,
+            reason=reason,
+        )
+    except Exception:
+        logger.exception(
+            "Failed to send account reactivation email "
+            "for user_id=%s recipient=%s.",
+            target_user.id,
+            recipient,
+        )
+
+    return response

@@ -5744,6 +5744,125 @@ def test_admin_can_suspend_user(
     )
 
 
+def test_admin_suspend_sends_deactivation_email(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A successful account suspension sends a deactivation email
+    after the suspension transaction commits.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4303,
+        username="emailsuspendadmin",
+        email="emailsuspendadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4304,
+        username="emailsuspendtarget",
+        email="emailsuspendtarget@example.com",
+    )
+
+    with patch(
+        "app.routers.profile.send_account_deactivation_email",
+        new_callable=AsyncMock,
+    ) as mock_send_email:
+        response = client.patch(
+            f"/api/profile/admin/{target_user.id}/deactivate",
+            headers=authenticated_headers(admin),
+            json={
+                "duration_hours": 24,
+                "reason": "Email suspension test.",
+            },
+        )
+
+    assert response.status_code == 200
+    mock_send_email.assert_awaited_once()
+
+    email_kwargs = mock_send_email.await_args.kwargs
+
+    assert email_kwargs["recipient"] == (
+        "emailsuspendtarget@example.com"
+    )
+    assert email_kwargs["deactivated_at"] is not None
+    assert email_kwargs["deactivated_until"] is not None
+    assert email_kwargs["reason"] == "Email suspension test."
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert email_kwargs["deactivated_at"] == (
+        target_user.deactivated_at
+    )
+    assert email_kwargs["deactivated_until"] == (
+        target_user.deactivated_until
+    )
+
+
+def test_admin_suspend_email_failure_does_not_rollback_suspension(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Email delivery failure does not roll back an already committed
+    account suspension.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4305,
+        username="emailfailadmin",
+        email="emailfailadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4306,
+        username="emailfailtarget",
+        email="emailfailtarget@example.com",
+    )
+
+    with patch(
+        "app.routers.profile.send_account_deactivation_email",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("SMTP delivery failed."),
+    ) as mock_send_email:
+        response = client.patch(
+            f"/api/profile/admin/{target_user.id}/deactivate",
+            headers=authenticated_headers(admin),
+            json={
+                "duration_hours": 24,
+                "reason": "Email failure transaction test.",
+            },
+        )
+
+    assert response.status_code == 200
+    mock_send_email.assert_awaited_once()
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["is_active"] is False
+    assert data["deactivation_reason"] == (
+        "Email failure transaction test."
+    )
+    assert data["deactivated_at"] is not None
+    assert data["deactivated_until"] is not None
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is False
+    assert target_user.deactivation_reason == (
+        "Email failure transaction test."
+    )
+    assert target_user.deactivated_at is not None
+    assert target_user.deactivated_until is not None
+
+
 def test_admin_can_suspend_moderator_without_changing_role(
     client: TestClient,
     db: Session,
@@ -6488,6 +6607,133 @@ def test_admin_can_manually_reactivate_suspended_user(
     )
 
     assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == target_user.id
+    assert data["is_active"] is True
+    assert data["deactivated_at"] is None
+    assert data["deactivated_until"] is None
+    assert data["deactivation_reason"] is None
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+
+
+def test_admin_activate_sends_reactivation_email(
+    client: TestClient,
+    db: Session,
+):
+    """
+    A successful manual account reactivation sends a reactivation
+    email after the activation transaction commits.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4513,
+        username="emailactivateadmin",
+        email="emailactivateadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4514,
+        username="emailactivatetarget",
+        email="emailactivatetarget@example.com",
+    )
+
+    suspend_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "Manual reactivation email test.",
+        },
+    )
+
+    assert suspend_response.status_code == 200
+
+    with patch(
+        "app.routers.profile.send_account_reactivation_email",
+        new_callable=AsyncMock,
+    ) as mock_send_email:
+        response = client.patch(
+            f"/api/profile/admin/{target_user.id}/activate",
+            headers=authenticated_headers(admin),
+        )
+
+    assert response.status_code == 200
+    mock_send_email.assert_awaited_once()
+
+    email_kwargs = mock_send_email.await_args.kwargs
+
+    assert email_kwargs["recipient"] == (
+        "emailactivatetarget@example.com"
+    )
+    assert email_kwargs["reactivated_at"] is not None
+    assert email_kwargs["reason"] == (
+        "Manual reactivation email test."
+    )
+
+    db.refresh(target_user)
+
+    assert target_user.is_active is True
+    assert target_user.deactivated_at is None
+    assert target_user.deactivated_until is None
+    assert target_user.deactivation_reason is None
+
+
+def test_admin_activate_email_failure_does_not_rollback_activation(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Email delivery failure does not roll back an already committed
+    manual account activation.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4515,
+        username="emailactivatefailadmin",
+        email="emailactivatefailadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4516,
+        username="emailactivatefailtarget",
+        email="emailactivatefailtarget@example.com",
+    )
+
+    suspend_response = client.patch(
+        f"/api/profile/admin/{target_user.id}/deactivate",
+        headers=authenticated_headers(admin),
+        json={
+            "duration_hours": 24,
+            "reason": "Manual activation email failure test.",
+        },
+    )
+
+    assert suspend_response.status_code == 200
+
+    with patch(
+        "app.routers.profile.send_account_reactivation_email",
+        new_callable=AsyncMock,
+        side_effect=RuntimeError("SMTP delivery failed."),
+    ) as mock_send_email:
+        response = client.patch(
+            f"/api/profile/admin/{target_user.id}/activate",
+            headers=authenticated_headers(admin),
+        )
+
+    assert response.status_code == 200
+    mock_send_email.assert_awaited_once()
 
     data = response.json()
 

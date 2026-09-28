@@ -58,6 +58,7 @@ from app.schemas.auth import (
 )
 
 from app.services.auth import (
+    InactiveAccountError,
     login_user,
     register_user,
 )
@@ -323,11 +324,17 @@ def login(
     # Authenticate
     # ------------------------------------------------------------------
 
-    result = login_user(
-        db,
-        login=data.identifier,
-        password=data.password,
-    )
+    try:
+        result = login_user(
+            db,
+            login=data.identifier,
+            password=data.password,
+        )
+    except InactiveAccountError:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Your TrackIt account is currently inactive.",
+        ) from None
 
     if result is None:
         raise HTTPException(

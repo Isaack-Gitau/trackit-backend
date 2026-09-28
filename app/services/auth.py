@@ -32,6 +32,22 @@ from app.services.user import create_user_account
 
 
 # ============================================================================
+# LOGIN EXCEPTIONS
+# ============================================================================
+
+
+class InactiveAccountError(Exception):
+    """
+    Raised when valid credentials belong to an inactive account.
+
+    This exception is intentionally raised only after the supplied
+    password has been successfully verified. This prevents the login
+    endpoint from revealing account status based only on a username
+    or email address.
+    """
+
+
+# ============================================================================
 # User Lookup
 # ============================================================================
 
@@ -221,6 +237,16 @@ def login_user(
     - active account
     - verified email
 
+    Security behavior:
+    - Unknown users return None.
+    - Wrong passwords return None.
+    - Correct credentials for an inactive account raise
+      InactiveAccountError.
+    - Correct credentials for an unverified account return None.
+
+    The inactive-account distinction is made only after the
+    password has been successfully verified.
+
     JWT claims:
     - sub  -> user ID
     - role -> authorization role
@@ -235,6 +261,9 @@ def login_user(
 
     if user is None:
         return None
+
+    if not user.is_active:
+        raise InactiveAccountError
 
     if not is_login_allowed(user):
         return None

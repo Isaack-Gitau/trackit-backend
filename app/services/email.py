@@ -457,6 +457,228 @@ Your password will remain unchanged.
 
 
 # ============================================================================
+# ACCOUNT DEACTIVATION
+# ============================================================================
+
+
+async def send_account_deactivation_email(
+    *,
+    recipient: str,
+    deactivated_at: datetime,
+    deactivated_until: datetime,
+    reason: str | None = None,
+) -> None:
+    """
+    Send an email notifying a user that their TRACKIT account has
+    been temporarily deactivated.
+
+    The email contains the deactivation timestamp, scheduled
+    reactivation timestamp, and, when available, the administrative
+    reason for the deactivation.
+
+    The reason is HTML-escaped before being inserted into the HTML
+    email body.
+    """
+
+    if not recipient or not recipient.strip():
+        raise ValueError(
+            "Recipient email cannot be empty."
+        )
+
+    formatted_deactivated_at = deactivated_at.astimezone().strftime(
+        "%B %d, %Y at %I:%M %p %Z"
+    )
+
+    formatted_deactivated_until = deactivated_until.astimezone().strftime(
+        "%B %d, %Y at %I:%M %p %Z"
+    )
+
+    safe_deactivated_at = escape(
+        formatted_deactivated_at
+    )
+
+    safe_deactivated_until = escape(
+        formatted_deactivated_until
+    )
+
+    safe_reason = None
+
+    if reason is not None:
+        normalized_reason = reason.strip()
+
+        if normalized_reason:
+            safe_reason = escape(
+                normalized_reason
+            )
+
+    reason_html = ""
+
+    if safe_reason is not None:
+        reason_html = f"""
+        <p style="font-size:16px;line-height:1.6;">
+            <strong>Reason provided by TrackIt administration:</strong><br>
+            {safe_reason}
+        </p>
+        """
+
+    reason_text = ""
+
+    if reason is not None and reason.strip():
+        reason_text = (
+            "\nReason provided by TrackIt administration:\n"
+            f"{reason.strip()}\n"
+        )
+
+    html_body = f"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Your TRACKIT account has been temporarily deactivated</title>
+</head>
+
+<body style="
+    margin:0;
+    padding:0;
+    background:#f8fafc;
+    font-family:Arial,Helvetica,sans-serif;
+    color:#0f172a;
+">
+
+    <div style="
+        max-width:600px;
+        margin:40px auto;
+        background:#ffffff;
+        border-radius:12px;
+        padding:40px;
+        box-shadow:0 4px 20px rgba(15,23,42,0.08);
+    ">
+
+        <h1 style="
+            margin-top:0;
+            color:#4f46e5;
+            font-size:28px;
+        ">
+            Your TRACKIT account has been temporarily deactivated
+        </h1>
+
+        <p style="font-size:16px;line-height:1.6;">
+            An administrator has temporarily deactivated your
+            TRACKIT account.
+        </p>
+
+        <p style="font-size:16px;line-height:1.6;">
+            You cannot sign in or access protected TRACKIT features
+            while your account is inactive.
+        </p>
+
+        <div style="
+            margin:25px 0;
+            padding:20px;
+            background:#f8fafc;
+            border-radius:8px;
+        ">
+            <p style="
+                margin:0;
+                font-size:14px;
+                color:#64748b;
+            ">
+                Deactivated
+            </p>
+
+            <p style="
+                margin:6px 0 18px;
+                font-size:16px;
+                color:#0f172a;
+            ">
+                {safe_deactivated_at}
+            </p>
+
+            <p style="
+                margin:0;
+                font-size:14px;
+                color:#64748b;
+            ">
+                Scheduled reactivation
+            </p>
+
+            <p style="
+                margin:6px 0 0;
+                font-size:16px;
+                color:#0f172a;
+            ">
+                {safe_deactivated_until}
+            </p>
+        </div>
+
+        {reason_html}
+
+        <p style="font-size:16px;line-height:1.6;">
+            Your existing TrackIt sessions have been invalidated.
+            You will need to sign in again after your account is
+            reactivated.
+        </p>
+
+        <hr style="
+            border:none;
+            border-top:1px solid #e2e8f0;
+            margin:30px 0;
+        ">
+
+        <p style="
+            font-size:14px;
+            line-height:1.6;
+            color:#64748b;
+        ">
+            If you believe this deactivation was made in error,
+            please contact TRACKIT support.
+        </p>
+
+        <p style="
+            font-size:14px;
+            color:#475569;
+        ">
+            — TRACKIT
+        </p>
+
+    </div>
+
+</body>
+</html>
+"""
+
+    text_body = f"""
+TRACKIT Account Temporarily Deactivated
+
+An administrator has temporarily deactivated your TRACKIT account.
+
+You cannot sign in or access protected TRACKIT features while
+your account is inactive.
+
+Deactivated:
+{formatted_deactivated_at}
+
+Scheduled reactivation:
+{formatted_deactivated_until}
+{reason_text}
+Your existing TrackIt sessions have been invalidated.
+You will need to sign in again after your account is reactivated.
+
+If you believe this deactivation was made in error,
+please contact TRACKIT support.
+
+— TRACKIT
+"""
+
+    await _send_email(
+        recipient=recipient,
+        subject="Your TRACKIT account has been temporarily deactivated",
+        html_body=html_body,
+        text_body=text_body,
+    )
+
+
 # ACCOUNT REACTIVATION
 # ============================================================================
 

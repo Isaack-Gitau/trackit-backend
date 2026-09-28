@@ -17,6 +17,7 @@ Tests:
 import pytest
 
 from app.services.auth import (
+    InactiveAccountError,
     authenticate_user,
     is_login_allowed,
     login_user,
@@ -288,20 +289,25 @@ def test_login_unverified_user_returns_none(db):
     assert result is None
 
 
-def test_login_inactive_user_returns_none(db):
+def test_login_inactive_user_raises_inactive_account_error(db):
     create_test_user(
         db,
         is_verified=True,
         is_active=False,
     )
 
-    result = login_user(
-        db,
-        login="testuser",
-        password="Trackit@123",
-    )
-
-    assert result is None
+    try:
+        login_user(
+            db,
+            login="testuser",
+            password="Trackit@123",
+        )
+    except InactiveAccountError:
+        pass
+    else:
+        raise AssertionError(
+            "Expected InactiveAccountError for an inactive account."
+        )
 
 
 def test_login_wrong_password_returns_none(db):
