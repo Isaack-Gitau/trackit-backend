@@ -881,6 +881,58 @@ def test_dismissed_matches_are_excluded_from_normal_listing(
     assert dismissed_match.id not in returned_ids
 
 
+def test_user_can_include_dismissed_matches_in_listing(
+    client,
+    db,
+):
+    lost_owner = create_user(
+        db,
+        user_id=3040,
+        username="match_include_dismissed_lost",
+    )
+
+    found_owner = create_user(
+        db,
+        user_id=3041,
+        username="match_include_dismissed_found",
+    )
+
+    lost_item = create_item(
+        db,
+        owner_id=lost_owner.id,
+        item_type="lost",
+    )
+
+    found_item = create_item(
+        db,
+        owner_id=found_owner.id,
+        item_type="found",
+    )
+
+    dismissed_match = create_match(
+        db,
+        lost_item_id=lost_item.id,
+        found_item_id=found_item.id,
+        is_dismissed=True,
+    )
+
+    response = client.get(
+        "/api/matches?include_dismissed=true",
+        headers=auth_headers(lost_owner),
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    returned_ids = {
+        item["id"]
+        for item in data
+    }
+
+    assert dismissed_match.id in returned_ids
+
+
 def test_dismissed_matches_are_excluded_from_item_listing(
     client,
     db,

@@ -56,10 +56,12 @@ router = APIRouter(
 def list_my_matches_endpoint(
     db: Session = Depends(get_db),
     current_user: User = Depends(get_current_verified_user),
+    include_dismissed: bool = False,
 ):
     return list_user_matches(
         db,
         user_id=current_user.id,
+        include_dismissed=include_dismissed,
     )
 
 
