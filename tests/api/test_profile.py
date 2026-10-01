@@ -7027,3 +7027,615 @@ def test_manual_activation_invalidates_old_jwt(
     )
 
     assert response.status_code == 401
+
+# ============================================================================
+# ADMIN PERMANENT ACCOUNT DELETION
+# ============================================================================
+
+
+def test_admin_can_permanently_delete_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator can permanently delete another user account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4601,
+        username="permanentdeleteadmin",
+        email="permanentdeleteadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4602,
+        username="permanentdeletetarget",
+        email="permanentdeletetarget@example.com",
+    )
+
+    target_user_id = target_user.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 204
+    assert response.content == b""
+
+    db.expire_all()
+
+    assert db.get(User, target_user_id) is None
+    assert db.get(User, admin.id) is not None
+
+
+def test_admin_delete_removes_target_owned_data(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrator deletion reuses the existing account-deletion
+    cascades for user-owned data.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4611,
+        username="admindatacleanup",
+        email="admindatacleanup@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4612,
+        username="admindatacleanuptarget",
+        email="admindatacleanuptarget@example.com",
+    )
+
+    item = Item(
+        user_id=target_user.id,
+        title="Admin deletion item",
+        description="Item owned by deleted account.",
+        type="lost",
+        category="Electronics",
+        location="Nairobi",
+        status="approved",
+    )
+
+    db.add(item)
+    db.flush()
+
+    claim = Claim(
+        item_id=item.id,
+        claimant_id=target_user.id,
+        reason="I believe this item belongs to me.",
+    )
+
+    report = Report(
+        item_id=item.id,
+        reporter_id=target_user.id,
+        reason="Admin deletion test.",
+        description="Report owned by deleted account.",
+    )
+
+    notification = Notification(
+        user_id=target_user.id,
+        type="account",
+        category="system",
+        priority="normal",
+        title="Deletion test",
+        message="Deletion test notification.",
+    )
+
+    comment = Comment(
+        item_id=item.id,
+        user_id=target_user.id,
+        content="Comment owned by deleted account.",
+    )
+
+    auth_token = AuthToken(
+        user_id=target_user.id,
+        token_hash="b" * 64,
+        token_type="password_reset",
+        expires_at=(
+            datetime.now(timezone.utc)
+            + timedelta(minutes=15)
+        ),
+    )
+
+    db.add_all(
+        [
+            claim,
+            report,
+            notification,
+            comment,
+            auth_token,
+        ]
+    )
+
+    db.flush()
+
+    match = Match(
+        lost_item_id=item.id,
+        found_item_id=item.id,
+        score=100,
+        match_level="high",
+        category_score=100,
+        title_score=100,
+        description_score=100,
+        location_score=100,
+        time_score=100,
+        reason="Administrator deletion cleanup test.",
+    )
+
+    db.add(match)
+    db.flush()
+
+    ids = {
+        "user": target_user.id,
+        "item": item.id,
+        "claim": claim.id,
+        "report": report.id,
+        "notification": notification.id,
+        "comment": comment.id,
+        "auth_token": auth_token.id,
+        "match": match.id,
+    }
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user.id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    assert db.get(User, ids["user"]) is None
+    assert db.get(Item, ids["item"]) is None
+    assert db.get(Claim, ids["claim"]) is None
+    assert db.get(Report, ids["report"]) is None
+    assert db.get(Notification, ids["notification"]) is None
+    assert db.get(Comment, ids["comment"]) is None
+    assert db.get(AuthToken, ids["auth_token"]) is None
+    assert db.get(Match, ids["match"]) is None
+    assert db.get(User, admin.id) is not None
+
+
+def test_admin_delete_creates_audit_log_for_deleted_target(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrator deletion creates an audit record identifying the
+    acting administrator and the deleted user as the resource.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4621,
+        username="auditdeleteadmin",
+        email="auditdeleteadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4622,
+        username="auditdeletetarget",
+        email="auditdeletetarget@example.com",
+    )
+
+    target_user_id = target_user.id
+
+    existing_admin_action_count = count_audit_logs(
+        db,
+        user_id=admin.id,
+    )
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    logs = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.user_id == admin.id,
+            AuditLog.action == "admin_action",
+            AuditLog.resource_type == "user",
+            AuditLog.resource_id == target_user_id,
+        )
+        .all()
+    )
+
+    assert count_audit_logs(
+        db,
+        user_id=admin.id,
+    ) == existing_admin_action_count + 1
+
+    assert len(logs) == 1
+
+    audit_log = logs[0]
+
+    assert audit_log.user_id == admin.id
+    assert audit_log.resource_type == "user"
+    assert audit_log.resource_id == target_user_id
+    assert audit_log.success is True
+    assert "permanently deleted user" in (
+        audit_log.details or ""
+    )
+
+    assert db.get(User, target_user_id) is None
+    assert db.get(User, admin.id) is not None
+
+
+def test_admin_delete_removes_target_media_after_commit(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Administrator deletion removes the target's stored media after
+    the database transaction commits.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4631,
+        username="medialdeleteadmin",
+        email="medialdeleteadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4632,
+        username="mediadeletetarget",
+        email="mediadeletetarget@example.com",
+    )
+
+    storage_key_one = "items/admin-delete-item-one.webp"
+    storage_key_two = "items/admin-delete-item-two.webp"
+
+    media_root = Path(settings.MEDIA_ROOT)
+
+    image_path_one = media_root / storage_key_one
+    image_path_two = media_root / storage_key_two
+
+    image_path_one.parent.mkdir(
+        parents=True,
+        exist_ok=True,
+    )
+
+    image_path_one.write_bytes(b"admin-delete-image-one")
+    image_path_two.write_bytes(b"admin-delete-image-two")
+
+    target_user.profile_picture = storage_key_one
+
+    item = Item(
+        user_id=target_user.id,
+        title="Admin media deletion item",
+        description="Item containing stored media.",
+        type="found",
+        category="Other",
+        location="Nairobi",
+        image=storage_key_two,
+        status="approved",
+    )
+
+    db.add(item)
+    db.flush()
+
+    target_user_id = target_user.id
+
+    assert image_path_one.exists()
+    assert image_path_two.exists()
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 204
+
+    assert not image_path_one.exists()
+    assert not image_path_two.exists()
+
+    db.expire_all()
+
+    assert db.get(User, target_user_id) is None
+    assert db.get(User, admin.id) is not None
+
+
+def test_admin_cannot_delete_themselves(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An administrator cannot permanently delete their own account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4641,
+        username="selfdeleteadmin",
+        email="selfdeleteadmin@example.com",
+    )
+
+    admin_id = admin.id
+
+    response = client.delete(
+        f"/api/profile/admin/{admin_id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "An administrator cannot delete their own account."
+    )
+
+    db.expire_all()
+
+    assert db.get(User, admin_id) is not None
+
+
+def test_admin_cannot_delete_last_active_administrator(
+    client: TestClient,
+    db: Session,
+):
+    """
+    The final active administrator cannot be permanently deleted.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4651,
+        username="lastadmin",
+        email="lastadmin@example.com",
+    )
+
+    response = client.delete(
+        f"/api/profile/admin/{admin.id}",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == (
+        "An administrator cannot delete their own account."
+    )
+
+    db.expire_all()
+
+    assert db.get(User, admin.id) is not None
+
+
+def test_admin_can_delete_another_administrator_when_multiple_active_admins_exist(
+    client: TestClient,
+    db: Session,
+):
+    """
+    When multiple active administrators exist, one administrator may
+    permanently delete another while preserving the final administrator.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=4661,
+        username="actingadmin",
+        email="actingadmin@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=4662,
+        username="targetadmin",
+        email="targetadmin@example.com",
+    )
+
+    target_admin_id = target_admin.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_admin_id}",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    assert db.get(User, target_admin_id) is None
+
+    remaining_admin = db.get(
+        User,
+        acting_admin.id,
+    )
+
+    assert remaining_admin is not None
+    assert remaining_admin.role == UserRole.ADMIN
+    assert remaining_admin.is_active is True
+
+
+def test_admin_can_delete_inactive_administrator_when_another_active_admin_exists(
+    client: TestClient,
+    db: Session,
+):
+    """
+    An inactive administrator may be permanently deleted when another
+    active administrator remains.
+    """
+
+    acting_admin = create_admin(
+        db,
+        user_id=4671,
+        username="inactiveadminremovalactor",
+        email="inactiveadminremovalactor@example.com",
+    )
+
+    target_admin = create_admin(
+        db,
+        user_id=4672,
+        username="inactiveadmintarget",
+        email="inactiveadmintarget@example.com",
+    )
+
+    target_admin.is_active = False
+    target_admin.deactivated_at = datetime.now(timezone.utc)
+    target_admin.deactivated_until = (
+        datetime.now(timezone.utc)
+        + timedelta(hours=24)
+    )
+    target_admin.deactivation_reason = (
+        "Inactive administrator deletion test."
+    )
+
+    db.flush()
+
+    target_admin_id = target_admin.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_admin_id}",
+        headers=authenticated_headers(acting_admin),
+    )
+
+    assert response.status_code == 204
+
+    db.expire_all()
+
+    assert db.get(User, target_admin_id) is None
+
+    remaining_admin = db.get(
+        User,
+        acting_admin.id,
+    )
+
+    assert remaining_admin is not None
+    assert remaining_admin.role == UserRole.ADMIN
+    assert remaining_admin.is_active is True
+
+
+def test_moderator_cannot_permanently_delete_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Moderators cannot permanently delete user accounts.
+    """
+
+    moderator = create_moderator(
+        db,
+        user_id=4681,
+        username="deletepermissionmoderator",
+        email="deletepermissionmoderator@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4682,
+        username="deletepermissiontarget",
+        email="deletepermissiontarget@example.com",
+    )
+
+    target_user_id = target_user.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+        headers=authenticated_headers(moderator),
+    )
+
+    assert response.status_code == 403
+
+    db.expire_all()
+
+    assert db.get(User, target_user_id) is not None
+
+
+def test_normal_user_cannot_permanently_delete_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Normal users cannot permanently delete another user's account.
+    """
+
+    user = create_test_user(
+        db,
+        user_id=4691,
+        username="deletepermissionuser",
+        email="deletepermissionuser@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=4692,
+        username="deletepermissionusertarget",
+        email="deletepermissionusertarget@example.com",
+    )
+
+    target_user_id = target_user.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+        headers=authenticated_headers(user),
+    )
+
+    assert response.status_code == 403
+
+    db.expire_all()
+
+    assert db.get(User, target_user_id) is not None
+
+
+def test_unauthenticated_user_cannot_permanently_delete_user(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Permanent administrator deletion requires authentication.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=4701,
+        username="unauthenticateddeletetarget",
+        email="unauthenticateddeletetarget@example.com",
+    )
+
+    target_user_id = target_user.id
+
+    response = client.delete(
+        f"/api/profile/admin/{target_user_id}",
+    )
+
+    assert response.status_code == 401
+
+    db.expire_all()
+
+    assert db.get(User, target_user_id) is not None
+
+
+def test_admin_delete_nonexistent_user_returns_404(
+    client: TestClient,
+    db: Session,
+):
+    """
+    Permanently deleting a nonexistent user returns 404.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=4711,
+        username="missingdeleteadmin",
+        email="missingdeleteadmin@example.com",
+    )
+
+    response = client.delete(
+        "/api/profile/admin/999999",
+        headers=authenticated_headers(admin),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found."

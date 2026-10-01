@@ -114,6 +114,7 @@ from app.services.audit_log import (
 )
 from app.services.user import (
     activate_suspended_user,
+    delete_user_account_by_admin_service,
     delete_user_account_service,
     delete_user_profile_picture_service,
     demote_admin_to_moderator_service,
@@ -1440,3 +1441,98 @@ async def activate_user(
         )
 
     return response
+
+
+# ============================================================================
+# ADMIN ONLY: PERMANENT ACCOUNT DELETION
+# ============================================================================
+
+
+@router.delete(
+    "/admin/{user_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Permanently delete a user account",
+)
+def delete_user_account(
+    user_id: int,
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> None:
+    """
+    Permanently delete a user account on behalf of an administrator.
+
+    Only authenticated administrators may perform this action.
+
+    Deletion rules:
+
+    - Administrators cannot delete themselves.
+    - The last active administrator cannot be deleted.
+    - All existing user-account database cascades are reused.
+    - The deletion audit record is created before the target account
+      is deleted and records the acting administrator as the actor.
+    - The database transaction must commit successfully before any
+      physical media files are removed.
+    - Physical media cleanup failures are logged and do not restore
+      an already committed account deletion.
+
+    This is permanent and is distinct from temporary account
+    deactivation.
+    """
+
+    target_user = get_user(
+        db,
+        user_id,
+    )
+
+    if target_user is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="User not found.",
+        )
+
+    target_user_id = target_user.id
+
+    try:
+        media_storage_keys = delete_user_account_by_admin_service(
+            db,
+            target_user=target_user,
+            acting_admin=current_admin,
+        )
+
+        create_audit_log(
+            db,
+            event_type=AUDIT_ADMIN_ACTION,
+            success=True,
+            description=(
+                f"Administrator {current_admin.id} "
+                f"permanently deleted user {target_user_id}."
+            ),
+            user_id=current_admin.id,
+            resource_type="user",
+            resource_id=target_user_id,
+        )
+
+        db.commit()
+
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except Exception:
+        db.rollback()
+        raise
+
+    for storage_key in media_storage_keys:
+        try:
+            delete_stored_image(storage_key)
+        except Exception:
+            logger.exception(
+                "Failed to delete stored media after permanent "
+                "account deletion for user_id=%s storage_key=%s.",
+                target_user_id,
+                storage_key,
+            )
+
+    return None

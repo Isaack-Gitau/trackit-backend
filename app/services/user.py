@@ -475,6 +475,82 @@ def delete_user_account_service(
 
 
 # ============================================================================
+# ADMIN ACCOUNT DELETION
+# ============================================================================
+
+
+def delete_user_account_by_admin_service(
+    db: Session,
+    *,
+    target_user: User,
+    acting_admin: User,
+) -> list[str]:
+    """
+    Permanently delete a user account on behalf of an administrator.
+
+    Security rules:
+
+    - Only callers already authorized as administrators may invoke
+      this service through the API layer.
+    - An administrator cannot delete their own account.
+    - The final active administrator cannot be deleted.
+    - The administrator-count check is serialized using the existing
+      PostgreSQL transaction-level advisory lock.
+    - All existing user-account deletion cascades are reused.
+    - Audit-log rows referencing the deleted user survive through
+      their existing ON DELETE SET NULL foreign key.
+    - The transaction is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Filesystem behavior:
+
+    - Profile-picture and item-image storage keys are collected before
+      deletion.
+    - Physical files are not deleted here.
+    - The returned storage keys are intended for post-commit cleanup.
+
+    Returns:
+        A list of storage keys belonging to the deleted user's profile
+        picture and item images.
+
+    Raises:
+        ValueError:
+            If the administrator attempts to delete themselves or if
+            the target is the final administrator.
+    """
+
+    if target_user.id == acting_admin.id:
+        raise ValueError(
+            "An administrator cannot delete their own account."
+        )
+
+    target_role = (
+        target_user.role or ""
+    ).strip().lower()
+
+    if (
+        target_role == UserRole.ADMIN
+        and target_user.is_active
+    ):
+        _acquire_admin_invariant_lock(db)
+
+        active_administrator_count = count_active_users_by_role(
+            db,
+            UserRole.ADMIN,
+        )
+
+        if active_administrator_count <= 1:
+            raise ValueError(
+                "The last active administrator cannot be deleted."
+            )
+
+    return delete_user_account_service(
+        db,
+        target_user,
+    )
+
+
+# ============================================================================
 # PROFILE MANAGEMENT
 # ============================================================================
 
