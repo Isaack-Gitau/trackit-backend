@@ -49,6 +49,7 @@ from app.services.item import (
 )
 from app.services.notification import (
     NOTIFICATION_ITEM_APPROVED,
+    NOTIFICATION_ITEM_REJECTED,
     NOTIFICATION_MATCH_FOUND,
 )
 
@@ -1324,19 +1325,42 @@ def test_admin_can_approve_pending_item(db, admin_user):
 
 def test_admin_can_reject_pending_item(db, admin_user):
     """
-    A pending item can be rejected.
+    A pending item can be rejected and notifies its owner.
     """
 
-    item = create_test_item(db)
+    item = create_test_item(
+        db,
+        title="Rejected Test Laptop",
+    )
+
+    rejection_reason = "Insufficient information."
 
     rejected = reject_item(
         db,
         item=item,
         reviewer_id=admin_user.id,
-        rejection_reason="Insufficient information.",
+        rejection_reason=rejection_reason,
     )
 
     assert rejected.status == "rejected"
+    assert rejected.rejection_reason == rejection_reason
+
+    notifications = db.query(Notification).filter(
+        Notification.user_id == item.user_id,
+    ).all()
+
+    assert len(notifications) == 1
+    assert notifications[0].type == NOTIFICATION_ITEM_REJECTED
+    assert notifications[0].title == "Item Rejected"
+    assert (
+        notifications[0].message
+        == (
+            f'Your item "{item.title}" was rejected. '
+            f"Reason: {rejection_reason}"
+        )
+    )
+    assert notifications[0].entity_type == "item"
+    assert notifications[0].entity_id == item.id
 
 
 def test_owner_cannot_approve_own_pending_item(db, admin_user):

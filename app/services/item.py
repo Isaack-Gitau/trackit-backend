@@ -28,6 +28,7 @@ from app.services.audit_log import (
 from app.services.match import generate_matches_for_item
 from app.services.notification import (
     NOTIFICATION_ITEM_APPROVED,
+    NOTIFICATION_ITEM_REJECTED,
     create_notification,
     notify_match_found,
 )
@@ -568,7 +569,7 @@ def reject_item(
 
     reviewed_at = datetime.now(timezone.utc)
 
-    return repository_update_item_status(
+    rejected_item = repository_update_item_status(
         db,
         item,
         status="rejected",
@@ -576,3 +577,18 @@ def reject_item(
         reviewed_by=resolved_reviewer_id,
         reviewed_at=reviewed_at,
     )
+
+    create_notification(
+        db,
+        user_id=rejected_item.user_id,
+        notification_type=NOTIFICATION_ITEM_REJECTED,
+        title="Item Rejected",
+        message=(
+            f'Your item "{rejected_item.title}" was rejected. '
+            f"Reason: {resolved_reason}"
+        ),
+        entity_type="item",
+        entity_id=rejected_item.id,
+    )
+
+    return rejected_item
