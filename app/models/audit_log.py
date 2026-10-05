@@ -36,6 +36,12 @@ if TYPE_CHECKING:
 class AuditLog(Base):
     """
     TRACKIT security and application audit event.
+
+    User associations have distinct meanings:
+
+    - user_id: the actor who performed the action.
+    - subject_user_id: the user affected by the action.
+    - resource_type/resource_id: the specific resource affected.
     """
 
     __tablename__ = "audit_logs"
@@ -95,9 +101,10 @@ class AuditLog(Base):
     )
 
     # ========================================================================
-    # User Association
+    # User Associations
     # ========================================================================
 
+    # Authenticated user who performed the action.
     user_id: Mapped[int | None] = mapped_column(
         ForeignKey(
             "users.id",
@@ -109,7 +116,24 @@ class AuditLog(Base):
 
     user: Mapped["User | None"] = relationship(
         "User",
+        foreign_keys=[user_id],
         back_populates="audit_logs",
+    )
+
+    # User affected by the action.
+    subject_user_id: Mapped[int | None] = mapped_column(
+        ForeignKey(
+            "users.id",
+            ondelete="SET NULL",
+        ),
+        nullable=True,
+        index=True,
+    )
+
+    subject_user: Mapped["User | None"] = relationship(
+        "User",
+        foreign_keys=[subject_user_id],
+        back_populates="subject_audit_logs",
     )
 
     # ========================================================================

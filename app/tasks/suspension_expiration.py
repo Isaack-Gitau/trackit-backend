@@ -88,6 +88,7 @@ def reactivate_expired_suspensions(
                 f"{user_id} after temporary suspension expired."
             ),
             user_id=None,
+            subject_user_id=user_id,
             resource_type="user",
             resource_id=user_id,
         )

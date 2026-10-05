@@ -736,6 +736,8 @@ class AdminAuditLogResponse(BaseModel):
 
     action: str
 
+    category: str
+
     success: bool
 
     details: str | None = None
@@ -746,9 +748,45 @@ class AdminAuditLogResponse(BaseModel):
 
     user_id: int | None = None
 
+    subject_user_id: int | None = None
+
     actor: AuditLogActorResponse | None = None
 
     created_at: datetime
+
+
+# -----------------------------------------------------------------------------
+
+
+class AdminAuditLogPreviewResponse(BaseModel):
+    """
+    Summary of the audit events matching administrative filters.
+
+    The preview intentionally returns metadata only. It does not
+    retrieve or expose individual audit-log records.
+    """
+
+    total: int
+
+    action: str | None = None
+
+    category: str | None = None
+
+    success: bool | None = None
+
+    user_id: int | None = None
+
+    user_ids: list[int] | None = None
+
+    subject_user_id: int | None = None
+
+    resource_type: str | None = None
+
+    resource_id: int | None = None
+
+    created_from: datetime | None = None
+
+    created_to: datetime | None = None
 
 
 # -----------------------------------------------------------------------------

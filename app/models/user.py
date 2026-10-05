@@ -206,7 +206,14 @@ class User(Base):
 
     audit_logs: Mapped[list["AuditLog"]] = relationship(
         "AuditLog",
+        foreign_keys="AuditLog.user_id",
         back_populates="user",
+    )
+
+    subject_audit_logs: Mapped[list["AuditLog"]] = relationship(
+        "AuditLog",
+        foreign_keys="AuditLog.subject_user_id",
+        back_populates="subject_user",
     )
 
     claims = relationship(

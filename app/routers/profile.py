@@ -62,19 +62,25 @@ password and permanently removes the account
 and its user-owned data.
 """
 
+import csv
+import io
+import json
 import logging
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import Literal
 
 from fastapi import (
     APIRouter,
     Body,
     Depends,
     File,
-    Query,
     HTTPException,
+    Query,
     UploadFile,
     status,
 )
+from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -88,6 +94,7 @@ from app.core.constants import UserRole
 from app.models.user import User
 from app.schemas.profile import (
     AdminAuditLogListResponse,
+    AdminAuditLogPreviewResponse,
     AdminAuditLogResponse,
     AdminEmailDeliveryResult,
     AdminEmailRequest,
@@ -110,7 +117,10 @@ from app.services.email import (
 from app.services.audit_log import (
     AUDIT_ADMIN_ACTION,
     create_audit_log,
+    export_audit_logs_for_admin,
+    get_audit_action_category,
     list_audit_logs_for_admin,
+    preview_audit_logs_for_admin,
 )
 from app.services.user import (
     activate_suspended_user,
@@ -702,6 +712,7 @@ async def send_admin_email(
                     f"to user {result.user_id}."
                 ),
                 user_id=current_admin.id,
+                subject_user_id=result.user_id,
                 resource_type="user",
                 resource_id=result.user_id,
             )
@@ -717,6 +728,7 @@ async def send_admin_email(
                     f"email to user {result.user_id}, but delivery failed."
                 ),
                 user_id=current_admin.id,
+                subject_user_id=result.user_id,
                 resource_type="user",
                 resource_id=result.user_id,
             )
@@ -807,6 +819,252 @@ def list_admin_users(
 
 
 @router.get(
+    "/admin/audit-logs/export",
+    status_code=status.HTTP_200_OK,
+    summary="Export audit logs",
+)
+def export_admin_audit_logs(
+    action: str | None = None,
+    category: str | None = None,
+    success: bool | None = None,
+    user_id: int | None = None,
+    user_ids: list[int] | None = Query(
+        default=None,
+        description="Filter by one or more acting user IDs. Repeat the parameter for multiple users.",
+    ),
+    subject_user_id: int | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    created_from: datetime | None = Query(
+        default=None,
+        description="Return logs created at or after this timestamp.",
+    ),
+    created_to: datetime | None = Query(
+        default=None,
+        description="Return logs created before this timestamp.",
+    ),
+    export_format: Literal["csv", "json"] = Query(
+        default="csv",
+        alias="format",
+        description="Export format.",
+    ),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+):
+    """
+    Stream a security-safe administrative audit-log export.
+
+    The export uses the same filters as the listing and preview endpoints.
+
+    IP addresses and user-agent strings are intentionally excluded.
+    """
+
+    try:
+        audit_logs = export_audit_logs_for_admin(
+            db,
+            action=action,
+            category=category,
+            success=success,
+            user_id=user_id,
+            user_ids=user_ids,
+            subject_user_id=subject_user_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            created_from=created_from,
+            created_to=created_to,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    fieldnames = [
+        "id",
+        "action",
+        "category",
+        "success",
+        "details",
+        "resource_type",
+        "resource_id",
+        "user_id",
+        "subject_user_id",
+        "actor_id",
+        "actor_username",
+        "created_at",
+    ]
+
+    def serialize_log(log) -> dict[str, object]:
+        return {
+            "id": log.id,
+            "action": log.action,
+            "category": get_audit_action_category(log.action),
+            "success": log.success,
+            "details": log.details,
+            "resource_type": log.resource_type,
+            "resource_id": log.resource_id,
+            "user_id": log.user_id,
+            "subject_user_id": log.subject_user_id,
+            "actor_id": (
+                log.user.id
+                if log.user is not None
+                else None
+            ),
+            "actor_username": (
+                log.user.username
+                if log.user is not None
+                else None
+            ),
+            "created_at": (
+                log.created_at.isoformat()
+                if log.created_at is not None
+                else None
+            ),
+        }
+
+    if export_format == "json":
+
+        def json_stream() -> Iterator[str]:
+            first = True
+            yield "["
+
+            for log in audit_logs:
+                if not first:
+                    yield ","
+
+                yield json.dumps(
+                    serialize_log(log),
+                    ensure_ascii=False,
+                )
+
+                first = False
+
+            yield "]"
+
+        return StreamingResponse(
+            json_stream(),
+            media_type="application/json",
+            headers={
+                "Content-Disposition": (
+                    'attachment; filename="trackit-audit-logs.json"'
+                ),
+            },
+        )
+
+    def csv_stream() -> Iterator[str]:
+        buffer = io.StringIO()
+
+        writer = csv.DictWriter(
+            buffer,
+            fieldnames=fieldnames,
+            extrasaction="ignore",
+        )
+
+        writer.writeheader()
+        yield buffer.getvalue()
+
+        for log in audit_logs:
+            buffer.seek(0)
+            buffer.truncate(0)
+
+            writer.writerow(serialize_log(log))
+            yield buffer.getvalue()
+
+    return StreamingResponse(
+        csv_stream(),
+        media_type="text/csv",
+        headers={
+            "Content-Disposition": (
+                'attachment; filename="trackit-audit-logs.csv"'
+            ),
+        },
+    )
+
+
+# -----------------------------------------------------------------------------
+# ADMIN ONLY: AUDIT LOGS
+# -----------------------------------------------------------------------------
+
+
+@router.get(
+    "/admin/audit-logs/preview",
+    response_model=AdminAuditLogPreviewResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Preview audit-log export",
+)
+def preview_admin_audit_logs(
+    action: str | None = None,
+    category: str | None = None,
+    success: bool | None = None,
+    user_id: int | None = None,
+    user_ids: list[int] | None = Query(
+        default=None,
+        description="Filter by one or more acting user IDs. Repeat the parameter for multiple users.",
+    ),
+    subject_user_id: int | None = None,
+    resource_type: str | None = None,
+    resource_id: int | None = None,
+    created_from: datetime | None = Query(
+        default=None,
+        description="Return logs created at or after this timestamp.",
+    ),
+    created_to: datetime | None = Query(
+        default=None,
+        description="Return logs created before this timestamp.",
+    ),
+    db: Session = Depends(get_db),
+    current_admin: User = Depends(get_current_admin),
+) -> AdminAuditLogPreviewResponse:
+    """
+    Preview the number of audit logs matching administrative filters.
+
+    The endpoint performs a count only. It does not retrieve or expose
+    individual audit-log records, IP addresses, user-agent strings, or
+    sensitive authentication data.
+    """
+
+    try:
+        total, filters = preview_audit_logs_for_admin(
+            db,
+            action=action,
+            category=category,
+            success=success,
+            user_id=user_id,
+            user_ids=user_ids,
+            subject_user_id=subject_user_id,
+            resource_type=resource_type,
+            resource_id=resource_id,
+            created_from=created_from,
+            created_to=created_to,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    return AdminAuditLogPreviewResponse(
+        total=total,
+        action=filters["action"],
+        category=filters["category"],
+        success=success,
+        user_id=filters["user_id"],
+        user_ids=filters["user_ids"],
+        subject_user_id=filters["subject_user_id"],
+        resource_type=filters["resource_type"],
+        resource_id=filters["resource_id"],
+        created_from=filters["created_from"],
+        created_to=filters["created_to"],
+    )
+
+
+# -----------------------------------------------------------------------------
+# ADMIN ONLY: AUDIT LOGS
+# -----------------------------------------------------------------------------
+
+
+@router.get(
     "/admin/audit-logs",
     response_model=AdminAuditLogListResponse,
     status_code=status.HTTP_200_OK,
@@ -814,10 +1072,24 @@ def list_admin_users(
 )
 def list_admin_audit_logs(
     action: str | None = None,
+    category: str | None = None,
     success: bool | None = None,
     user_id: int | None = None,
+    user_ids: list[int] | None = Query(
+        default=None,
+        description="Filter by one or more acting user IDs. Repeat the parameter for multiple users.",
+    ),
+    subject_user_id: int | None = None,
     resource_type: str | None = None,
     resource_id: int | None = None,
+    created_from: datetime | None = Query(
+        default=None,
+        description="Return logs created at or after this timestamp.",
+    ),
+    created_to: datetime | None = Query(
+        default=None,
+        description="Return logs created before this timestamp.",
+    ),
     page: int = 1,
     limit: int = 20,
     db: Session = Depends(get_db),
@@ -826,8 +1098,9 @@ def list_admin_audit_logs(
     """
     Return a paginated audit-log listing for administrators.
 
-    Administrators may filter audit events by action, success state,
-    acting user, resource type, and resource ID.
+    Administrators may filter audit events by action, category,
+    success state, acting user, affected user, resource type,
+    resource ID, and creation-time range.
 
     Only the security-safe audit representation is returned.
 
@@ -842,10 +1115,15 @@ def list_admin_audit_logs(
         logs, total = list_audit_logs_for_admin(
             db,
             action=action,
+            category=category,
             success=success,
             user_id=user_id,
+            user_ids=user_ids,
+            subject_user_id=subject_user_id,
             resource_type=resource_type,
             resource_id=resource_id,
+            created_from=created_from,
+            created_to=created_to,
             page=page,
             limit=limit,
         )
@@ -860,11 +1138,13 @@ def list_admin_audit_logs(
         AdminAuditLogResponse(
             id=log.id,
             action=log.action,
+            category=get_audit_action_category(log.action),
             success=log.success,
             details=log.details,
             resource_type=log.resource_type,
             resource_id=log.resource_id,
             user_id=log.user_id,
+            subject_user_id=log.subject_user_id,
             actor=(
                 {
                     "id": log.user.id,
@@ -1003,6 +1283,9 @@ def promote_user_to_moderator(
                 "from user to moderator."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         return AdminUserDetailResponse.model_validate(
@@ -1072,6 +1355,9 @@ def promote_moderator_to_admin(
                 "from moderator to administrator."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         return AdminUserDetailResponse.model_validate(
@@ -1143,6 +1429,9 @@ def demote_admin_to_moderator(
                 "from administrator to moderator."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         return AdminUserDetailResponse.model_validate(
@@ -1212,6 +1501,9 @@ def revoke_moderator(
                 "from moderator to user."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         return AdminUserDetailResponse.model_validate(
@@ -1298,6 +1590,9 @@ async def deactivate_user(
                 f"for {suspension_data.duration_hours} hours."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         response = AdminUserDetailResponse.model_validate(
@@ -1408,6 +1703,9 @@ async def activate_user(
                 f"reactivated user {target_user.id}."
             ),
             user_id=current_admin.id,
+            subject_user_id=target_user.id,
+            resource_type="user",
+            resource_id=target_user.id,
         )
 
         response = AdminUserDetailResponse.model_validate(

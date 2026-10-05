@@ -379,7 +379,7 @@ async def send_password_reset_email(
             line-height:1.6;
             color:#64748b;
         ">
-            This password-reset link expires in 30 minutes
+            This password-reset link expires in 15 minutes
             and can only be used once.
         </p>
 
@@ -438,7 +438,7 @@ Use the link below to choose a new password:
 
 {reset_url}
 
-This password-reset link expires in 30 minutes
+This password-reset link expires in 15 minutes
 and can only be used once.
 
 If you did not request a password reset,
