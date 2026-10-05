@@ -19,6 +19,7 @@ Security principles:
 
 from collections.abc import Iterator
 from datetime import datetime
+from typing import TypedDict
 
 from sqlalchemy.orm import Session
 
@@ -143,6 +144,20 @@ def get_audit_action_category(action: str | None) -> str:
     )
 
 
+class AuditLogFilterSet(TypedDict):
+    action: str | None
+    category: str | None
+    actions: list[str] | None
+    exclude_actions: list[str] | None
+    user_id: int | None
+    user_ids: list[int] | None
+    subject_user_id: int | None
+    resource_type: str | None
+    resource_id: int | None
+    created_from: datetime | None
+    created_to: datetime | None
+
+
 def _prepare_audit_log_filters(
     *,
     action: str | None,
@@ -154,7 +169,7 @@ def _prepare_audit_log_filters(
     resource_id: int | None,
     created_from: datetime | None,
     created_to: datetime | None,
-) -> dict[str, object]:
+) -> AuditLogFilterSet:
     """
     Normalize and validate shared administrative audit filters.
 
@@ -203,8 +218,8 @@ def _prepare_audit_log_filters(
             "Unknown audit-log category."
         )
 
-    category_actions = None
-    category_exclude_actions = None
+    category_actions: list[str] | None = None
+    category_exclude_actions: list[str] | None = None
 
     if normalized_category is not None:
         if normalized_category == "other":
@@ -258,7 +273,7 @@ def _prepare_audit_log_filters(
                 "User IDs cannot be empty."
             )
 
-        normalized_user_ids = []
+        normalized_user_ids: list[int] | None = []
 
         for candidate_user_id in user_ids:
             if (
@@ -579,7 +594,7 @@ def preview_audit_logs_for_admin(
     resource_id: int | None = None,
     created_from: datetime | None = None,
     created_to: datetime | None = None,
-) -> tuple[int, dict[str, object]]:
+) -> tuple[int, AuditLogFilterSet]:
     """
     Return the number of audit logs matching administrative filters.
 

@@ -97,6 +97,8 @@ from app.schemas.profile import (
     AdminAuditLogPreviewResponse,
     AdminAuditLogResponse,
     AdminEmailDeliveryResult,
+    AdminUserListItem,
+    AuditLogActorResponse,
     AdminEmailRequest,
     AdminEmailResponse,
     AdminUserDetailResponse,
@@ -806,7 +808,10 @@ def list_admin_users(
     )
 
     return AdminUserListResponse(
-        items=users,
+        items=[
+            AdminUserListItem.model_validate(user)
+            for user in users
+        ],
         page=page,
         limit=limit,
         total=total,
@@ -1146,10 +1151,10 @@ def list_admin_audit_logs(
             user_id=log.user_id,
             subject_user_id=log.subject_user_id,
             actor=(
-                {
-                    "id": log.user.id,
-                    "username": log.user.username,
-                }
+                AuditLogActorResponse(
+                    id=log.user.id,
+                    username=log.user.username,
+                )
                 if log.user is not None
                 else None
             ),
