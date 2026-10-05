@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from PIL import Image
@@ -191,6 +192,45 @@ def test_valid_image_stream_is_accepted(
 
     assert storage_key.startswith("items/")
     assert (tmp_path / storage_key).exists()
+
+
+@pytest.mark.parametrize(
+    ("image_format", "image_factory", "expected_content_type"),
+    [
+        ("JPEG", make_jpeg_bytes, "image/jpeg"),
+        ("PNG", make_png_bytes, "image/png"),
+        ("WEBP", make_webp_bytes, "image/webp"),
+    ],
+)
+def test_sanitize_and_store_passes_trusted_content_type(
+    monkeypatch,
+    image_format: str,
+    image_factory,
+    expected_content_type: str,
+):
+    """
+    The storage backend receives a MIME type derived from the image format
+    validated by Pillow, never from client-provided metadata.
+    """
+
+    storage_backend = Mock()
+
+    monkeypatch.setattr(
+        "app.utils.images.get_storage_backend",
+        lambda: storage_backend,
+    )
+
+    storage_key = sanitize_and_store_image(
+        image_factory()
+    )
+
+    assert storage_key.startswith("items/")
+
+    storage_backend.save.assert_called_once()
+
+    call = storage_backend.save.call_args
+
+    assert call.kwargs["content_type"] == expected_content_type
 
 
 # ============================================================================

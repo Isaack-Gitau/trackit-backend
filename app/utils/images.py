@@ -32,6 +32,7 @@ from PIL import Image, UnidentifiedImageError
 from PIL.Image import DecompressionBombError, DecompressionBombWarning
 
 from app.core.config import settings
+from app.utils.storage import StorageError, get_storage_backend
 
 
 # ============================================================================
@@ -104,6 +105,28 @@ def _extension_for_format(image_format: str) -> str:
 
     try:
         return extensions[image_format.upper()]
+    except KeyError as exc:
+        raise ImageFormatError(
+            f"Unsupported image format: {image_format}"
+        ) from exc
+
+
+def _content_type_for_format(image_format: str) -> str:
+    """
+    Return the trusted MIME type for a validated Pillow image format.
+
+    This mapping is based on the server-validated image format rather than
+    the client-provided MIME type.
+    """
+
+    content_types = {
+        "JPEG": "image/jpeg",
+        "PNG": "image/png",
+        "WEBP": "image/webp",
+    }
+
+    try:
+        return content_types[image_format.upper()]
     except KeyError as exc:
         raise ImageFormatError(
             f"Unsupported image format: {image_format}"
@@ -499,6 +522,58 @@ def _ensure_safe_path(
     return path
 
 
+def _validate_storage_key(
+    storage_key: str,
+) -> tuple[str, str]:
+    """
+    Validate a TRACKIT image storage key without touching the filesystem.
+
+    Only the supported media scopes and a single filename component are
+    accepted. This validation is storage-backend agnostic so the same rules
+    apply to local filesystem storage and remote object storage.
+    """
+
+    if not storage_key:
+        raise ImageProcessingError(
+            "Image storage key is required."
+        )
+
+    if storage_key.startswith("/"):
+        raise ImageProcessingError(
+            "Invalid image storage key."
+        )
+
+    if "\\" in storage_key:
+        raise ImageProcessingError(
+            "Invalid image storage key."
+        )
+
+    parts = PurePosixPath(storage_key).parts
+
+    if (
+        len(parts) != 2
+        or parts[0] not in {"items", "profiles"}
+    ):
+        raise ImageProcessingError(
+            "Invalid image storage key."
+        )
+
+    storage_scope = parts[0]
+    filename = parts[1]
+
+    if (
+        not filename
+        or filename in {".", ".."}
+        or "/" in filename
+        or "\\" in filename
+    ):
+        raise ImageProcessingError(
+            "Invalid image storage key."
+        )
+
+    return storage_scope, filename
+
+
 def _safe_storage_path(
     filename: str,
     storage_scope: str = "items",
@@ -546,10 +621,11 @@ def _save_sanitized_image(
     storage_scope: str = "items",
 ) -> tuple[str, Path]:
     """
-    Re-encode and safely store an image.
+    Re-encode and safely store an image through the configured storage
+    backend.
 
-    The output is written using a newly generated filename.
-    Existing files are never intentionally overwritten.
+    The image security pipeline remains in this module. The storage backend
+    is responsible only for persistence and public URL generation.
     """
 
     normalized_format = _pillow_format(image_format)
@@ -559,99 +635,81 @@ def _save_sanitized_image(
         normalized_format,
     )
 
-    directory = _storage_directory(storage_scope)
-
-    directory.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
+    storage_backend = get_storage_backend()
 
     try:
-        # Try several times in the extremely unlikely event of a
-        # filename collision.
-        for _ in range(10):
-            filename = generate_image_filename(
-                normalized_format
-            )
+        # Generate the storage key from a cryptographically random filename.
+        filename = generate_image_filename(
+            normalized_format
+        )
 
-            destination = _safe_storage_path(
-                filename,
-                storage_scope,
-            )
+        storage_key = (
+            f"{storage_scope}/{filename}"
+        )
 
-            if destination.exists():
-                continue
+        # Encode the already-sanitized pixel data into memory. No original
+        # upload bytes or metadata are passed to the storage backend.
+        encoded = io.BytesIO()
 
-            # Temporary files remain beneath the selected media scope.
-            temporary_name = f".{secrets.token_hex(16)}.tmp"
-            temporary_path = _safe_storage_path(
-                temporary_name,
-                storage_scope,
-            )
-
-            try:
-                if normalized_format == "JPEG":
-                    sanitized_image.save(
-                        temporary_path,
-                        format=normalized_format,
-                        quality=90,
-                        optimize=True,
-                    )
-
-                elif normalized_format == "WEBP":
-                    sanitized_image.save(
-                        temporary_path,
-                        format=normalized_format,
-                        quality=90,
-                        method=6,
-                    )
-
-                elif normalized_format == "PNG":
-                    sanitized_image.save(
-                        temporary_path,
-                        format=normalized_format,
-                        optimize=True,
-                    )
-
-                else:
-                    raise ImageFormatError(
-                        f"Unsupported image format: {normalized_format}"
-                    )
-
-                # The generated destination name is random. Replacing
-                # an existing file is therefore extremely unlikely.
-                temporary_path.replace(destination)
-
-                return (
-                    f"{storage_scope}/{filename}",
-                    destination,
+        try:
+            if normalized_format == "JPEG":
+                sanitized_image.save(
+                    encoded,
+                    format=normalized_format,
+                    quality=90,
+                    optimize=True,
                 )
 
-            except ImageFormatError:
-                try:
-                    temporary_path.unlink(
-                        missing_ok=True
-                    )
-                except OSError:
-                    pass
+            elif normalized_format == "WEBP":
+                sanitized_image.save(
+                    encoded,
+                    format=normalized_format,
+                    quality=90,
+                    method=6,
+                )
 
-                raise
+            elif normalized_format == "PNG":
+                sanitized_image.save(
+                    encoded,
+                    format=normalized_format,
+                    optimize=True,
+                )
 
-            except Exception as exc:
-                try:
-                    temporary_path.unlink(
-                        missing_ok=True
-                    )
-                except OSError:
-                    pass
+            else:
+                raise ImageFormatError(
+                    f"Unsupported image format: {normalized_format}"
+                )
 
-                raise ImageProcessingError(
-                    "Failed to safely store the image."
-                ) from exc
+            encoded.seek(0)
 
+            storage_backend.save(
+                encoded,
+                storage_key,
+                content_type=_content_type_for_format(
+                    normalized_format
+                ),
+            )
+
+        finally:
+            encoded.close()
+
+        # The second tuple value is retained for compatibility with the
+        # existing private function contract. Remote storage does not have a
+        # meaningful local Path, so callers must not rely on this value.
+        return storage_key, Path(storage_key)
+
+    except ImageFormatError:
+        raise
+
+    except StorageError as exc:
         raise ImageProcessingError(
-            "Unable to generate a unique image filename."
-        )
+            "Failed to safely store the image."
+        ) from exc
+
+    except Exception as exc:
+        raise ImageProcessingError(
+            "Failed to safely store the image."
+        ) from exc
 
     finally:
         sanitized_image.close()
@@ -785,67 +843,20 @@ def delete_stored_image(
     """
     Safely delete an image using its relative storage key.
 
-    The supplied value must point to an image inside:
+    The storage key must point to an image inside one of the supported
+    TRACKIT media scopes:
 
-        MEDIA_ROOT/items/
-
-    Example:
-
-        items/4f7a...91.webp
-
-    Invalid or empty storage keys are rejected.
+        items/
+        profiles/
     """
 
-    if not storage_key:
-        raise ImageProcessingError(
-            "Image storage key is required."
-        )
-
-    # Backslashes are never accepted as a legitimate storage-key separator.
-    if "\\" in storage_key:
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    # Absolute-style paths are rejected.
-    if storage_key.startswith("/"):
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    parts = PurePosixPath(storage_key).parts
-
-    if (
-        len(parts) != 2
-        or parts[0] not in {"items", "profiles"}
-    ):
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    storage_scope = parts[0]
-    filename = parts[1]
-
-    if (
-        not filename
-        or filename in {".", ".."}
-        or "/" in filename
-        or "\\" in filename
-    ):
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    path = _safe_storage_path(
-        filename,
-        storage_scope,
-    )
+    _validate_storage_key(storage_key)
 
     try:
-        path.unlink(
-            missing_ok=True
+        get_storage_backend().delete(
+            storage_key
         )
-    except OSError as exc:
+    except StorageError as exc:
         raise ImageProcessingError(
             "Failed to delete stored image."
         ) from exc
@@ -862,66 +873,17 @@ def image_storage_key_to_url(
     """
     Convert a safe relative storage key into a public media URL.
 
-    Example:
-
-        items/abc123.webp
-        ->
-        /media/items/abc123.webp
-
-    Absolute paths and traversal attempts are rejected.
+    The storage backend determines the final URL. This allows local media
+    paths during development and absolute object-storage URLs in production.
     """
 
-    if not storage_key:
-        raise ImageProcessingError(
-            "Image storage key is required."
+    _validate_storage_key(storage_key)
+
+    try:
+        return get_storage_backend().get_url(
+            storage_key
         )
-
-    # Do not normalize away an invalid leading slash.
-    if storage_key.startswith("/"):
+    except StorageError as exc:
         raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    # Backslashes are not valid storage-key separators.
-    if "\\" in storage_key:
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    parts = PurePosixPath(storage_key).parts
-
-    if (
-        len(parts) != 2
-        or parts[0] not in {"items", "profiles"}
-    ):
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    storage_scope = parts[0]
-    filename = parts[1]
-
-    if (
-        not filename
-        or filename in {".", ".."}
-        or "/" in filename
-        or "\\" in filename
-    ):
-        raise ImageProcessingError(
-            "Invalid image storage key."
-        )
-
-    # Validate that the filename maps to a safe location even though this
-    # function only constructs a URL.
-    _safe_storage_path(
-        filename,
-        storage_scope,
-    )
-
-    media_url = settings.MEDIA_URL.rstrip("/")
-
-    return (
-        f"{media_url}/"
-        f"{parts[0]}/"
-        f"{filename}"
-    )
+            "Failed to resolve stored image URL."
+        ) from exc

@@ -73,15 +73,18 @@ configure_security_middleware(app)
 # ============================================================================
 
 # Uploaded item images and profile pictures are stored beneath the
-# configured media root. The image utility is responsible for validating
-# and sanitizing uploaded files before they reach this directory.
-app.mount(
-    settings.MEDIA_URL.rstrip("/"),
-    StaticFiles(
-        directory=settings.MEDIA_ROOT,
-    ),
-    name="media",
-)
+# configured media root when local storage is active.
+#
+# Object-storage backends such as Cloudflare R2 serve media directly from
+# their configured public URL, so the local /media mount is not required.
+if settings.STORAGE_BACKEND.strip().lower() == "local":
+    app.mount(
+        settings.MEDIA_URL.rstrip("/"),
+        StaticFiles(
+            directory=settings.MEDIA_ROOT,
+        ),
+        name="media",
+    )
 
 
 # ============================================================================
