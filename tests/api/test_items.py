@@ -168,6 +168,20 @@ def make_oversized_image_bytes() -> bytes:
     return buffer.getvalue()
 
 
+def get_stored_image_key(
+    db: Session,
+    item_id: int,
+) -> str | None:
+    item = db.get(Item, item_id)
+
+    if item is None:
+        raise AssertionError(
+            f"Item {item_id} was not found in the database."
+        )
+
+    return item.image
+
+
 def create_multipart_item(
     client: TestClient,
     user: User,
@@ -1587,7 +1601,13 @@ def test_verified_user_can_upload_jpeg(
         assert data["image"] is not None
         assert data["image"] != "my-photo.jpg"
 
-        stored_key = data["image"]
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
 
         assert not Path(stored_key).is_absolute()
         assert ".." not in Path(stored_key).parts
@@ -1637,7 +1657,15 @@ def test_verified_user_can_upload_png(
 
         assert data["image"] is not None
 
-        stored_path = Path(settings.MEDIA_ROOT) / data["image"]
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
+
+        stored_path = Path(settings.MEDIA_ROOT) / stored_key
 
         assert stored_path.exists()
         assert stored_path.is_file()
@@ -1682,7 +1710,15 @@ def test_verified_user_can_upload_webp(
 
         assert data["image"] is not None
 
-        stored_path = Path(settings.MEDIA_ROOT) / data["image"]
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
+
+        stored_path = Path(settings.MEDIA_ROOT) / stored_key
 
         assert stored_path.exists()
         assert stored_path.is_file()
@@ -1815,7 +1851,14 @@ def test_client_filename_cannot_control_storage_path(
 
         data = response.json()
 
-        stored_key = data["image"]
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
+
         stored_path = (Path(settings.MEDIA_ROOT) / stored_key).resolve()
         media_root = Path(settings.MEDIA_ROOT).resolve()
 
@@ -1871,8 +1914,23 @@ def test_server_generates_random_storage_name(
         assert first_response.status_code == 201
         assert second_response.status_code == 201
 
-        first_key = first_response.json()["image"]
-        second_key = second_response.json()["image"]
+        first_data = first_response.json()
+        second_data = second_response.json()
+
+        first_key = get_stored_image_key(
+            db,
+            first_data["id"],
+        )
+        second_key = get_stored_image_key(
+            db,
+            second_data["id"],
+        )
+
+        assert first_key is not None
+        assert second_key is not None
+
+        assert first_data["image"] == f"/media/{first_key}"
+        assert second_data["image"] == f"/media/{second_key}"
 
         assert first_key != "same-name.jpg"
         assert second_key != "same-name.jpg"
@@ -1915,7 +1973,16 @@ def test_uploaded_image_is_reencoded_and_not_raw_client_bytes(
 
         assert response.status_code == 201
 
-        stored_key = response.json()["image"]
+        data = response.json()
+
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
+
         stored_path = Path(settings.MEDIA_ROOT) / stored_key
 
         assert stored_path.exists()
@@ -1963,7 +2030,16 @@ def test_transparent_png_is_supported_without_becoming_active_content(
 
         assert response.status_code == 201
 
-        stored_key = response.json()["image"]
+        data = response.json()
+
+        stored_key = get_stored_image_key(
+            db,
+            data["id"],
+        )
+
+        assert stored_key is not None
+        assert data["image"] == f"/media/{stored_key}"
+
         stored_path = Path(settings.MEDIA_ROOT) / stored_key
 
         assert stored_path.exists()

@@ -39,8 +39,11 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    field_serializer,
     field_validator,
 )
+
+from app.utils.images import image_value_to_url
 
 
 # ============================================================================
@@ -170,6 +173,17 @@ class PublicProfileResponse(BaseModel):
 
     profile_picture: str | None = None
 
+    @field_serializer("profile_picture")
+    def serialize_profile_picture(
+        self,
+        value: str | None,
+    ) -> str | None:
+        """Convert the internal storage key into a public media URL."""
+        if value is None:
+            return None
+
+        return image_value_to_url(value)
+
     bio: str | None = None
 
     first_name: str | None = None
@@ -213,6 +227,17 @@ class ProfileResponse(BaseModel):
     email: str
 
     profile_picture: str | None = None
+
+    @field_serializer("profile_picture")
+    def serialize_profile_picture(
+        self,
+        value: str | None,
+    ) -> str | None:
+        """Convert the internal storage key into a public media URL."""
+        if value is None:
+            return None
+
+        return image_value_to_url(value)
 
     phone_number: str | None = None
 
@@ -302,6 +327,17 @@ class AdminUserDetailResponse(BaseModel):
     # ========================================================================
 
     profile_picture: str | None = None
+
+    @field_serializer("profile_picture")
+    def serialize_profile_picture(
+        self,
+        value: str | None,
+    ) -> str | None:
+        """Convert the internal storage key into a public media URL."""
+        if value is None:
+            return None
+
+        return image_value_to_url(value)
 
     phone_number: str | None = None
 

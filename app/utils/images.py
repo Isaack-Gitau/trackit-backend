@@ -887,3 +887,31 @@ def image_storage_key_to_url(
         raise ImageProcessingError(
             "Failed to resolve stored image URL."
         ) from exc
+
+
+def image_value_to_url(
+    value: str | None,
+) -> str | None:
+    """
+    Convert an image value into a public URL.
+
+    TRACKIT normally stores relative image storage keys such as
+    ``items/example.webp`` and ``profiles/avatar.webp``. Older
+    profile data may also contain an already-public HTTP(S) URL.
+    """
+    if value is None:
+        return None
+
+    normalized_value = value.strip()
+
+    if not normalized_value:
+        return None
+
+    if normalized_value.startswith(
+        ("http://", "https://")
+    ):
+        return normalized_value
+
+    return image_storage_key_to_url(
+        normalized_value
+    )

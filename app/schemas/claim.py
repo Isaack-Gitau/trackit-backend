@@ -17,7 +17,15 @@ Security principles:
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
+
+from app.utils.images import image_storage_key_to_url
 
 
 # ============================================================================
@@ -118,6 +126,17 @@ class ClaimItemSummary(BaseModel):
     category: str
     location: str
     image: str | None
+
+    @field_serializer("image")
+    def serialize_image(
+        self,
+        value: str | None,
+    ) -> str | None:
+        """Convert the internal storage key into a public media URL."""
+        if value is None:
+            return None
+
+        return image_storage_key_to_url(value)
 
 
 # ============================================================================

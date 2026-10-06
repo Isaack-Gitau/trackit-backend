@@ -19,6 +19,7 @@ from app.utils.images import (
     delete_stored_image,
     generate_image_filename,
     image_storage_key_to_url,
+    image_value_to_url,
     sanitize_and_store_image,
     validate_image_dimensions,
     validate_image_size,
@@ -712,6 +713,40 @@ def test_image_storage_key_to_url_rejects_invalid_keys(
 ):
     with pytest.raises(ImageProcessingError):
         image_storage_key_to_url(invalid_key)
+
+
+def test_image_value_to_url_returns_none_for_none():
+    assert image_value_to_url(None) is None
+
+
+def test_image_value_to_url_returns_none_for_blank_value():
+    assert image_value_to_url("   ") is None
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://example.com/profile.jpg",
+        "http://example.com/profile.jpg",
+    ],
+)
+def test_image_value_to_url_preserves_absolute_urls(
+    url: str,
+):
+    assert image_value_to_url(url) == url
+
+
+def test_image_value_to_url_converts_storage_key():
+    url = image_value_to_url(
+        "profiles/example-profile.webp"
+    )
+
+    assert url == "/media/profiles/example-profile.webp"
+
+
+def test_image_value_to_url_rejects_invalid_value():
+    with pytest.raises(ImageProcessingError):
+        image_value_to_url("users/example.webp")
 
 
 # ============================================================================

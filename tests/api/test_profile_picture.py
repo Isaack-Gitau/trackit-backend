@@ -128,18 +128,22 @@ def test_upload_profile_picture_stores_profile_image(
 
     assert data["id"] == user.id
     assert data["profile_picture"] is not None
-    assert data["profile_picture"].startswith("profiles/")
+    assert data["profile_picture"].startswith("/media/profiles/")
     assert data["profile_picture"].endswith(".png")
 
-    stored_key = data["profile_picture"]
+    db.refresh(user)
+
+    stored_key = user.profile_picture
+
+    assert stored_key is not None
+    assert data["profile_picture"] == f"/media/{stored_key}"
+    assert stored_key.startswith("profiles/")
+    assert stored_key.endswith(".png")
+
     stored_path = tmp_path / stored_key
 
     assert stored_path.exists()
     assert stored_path.is_file()
-
-    db.refresh(user)
-
-    assert user.profile_picture == stored_key
 
 
 def test_upload_profile_picture_ignores_client_filename(
@@ -179,7 +183,16 @@ def test_upload_profile_picture_ignores_client_filename(
 
     assert response.status_code == 200
 
-    stored_key = response.json()["profile_picture"]
+    data = response.json()
+
+    assert data["profile_picture"].startswith("/media/profiles/")
+
+    db.refresh(user)
+
+    stored_key = user.profile_picture
+
+    assert stored_key is not None
+    assert data["profile_picture"] == f"/media/{stored_key}"
 
     assert stored_key.startswith("profiles/")
     assert "../../" not in stored_key
@@ -294,17 +307,22 @@ def test_upload_profile_picture_replaces_previous_image(
 
     assert response.status_code == 200
 
-    new_key = response.json()["profile_picture"]
+    data = response.json()
+
+    assert data["profile_picture"].startswith("/media/profiles/")
+
+    db.refresh(user)
+
+    new_key = user.profile_picture
+
+    assert new_key is not None
+    assert data["profile_picture"] == f"/media/{new_key}"
 
     assert new_key.startswith("profiles/")
     assert new_key != "profiles/old-profile.png"
 
     assert not previous_path.exists()
     assert (tmp_path / new_key).is_file()
-
-    db.refresh(user)
-
-    assert user.profile_picture == new_key
 
 
 # ============================================================================
