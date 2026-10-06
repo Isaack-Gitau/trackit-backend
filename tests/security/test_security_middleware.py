@@ -64,7 +64,7 @@ def test_security_headers_are_present(
              "default-src 'self'; "
              "script-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
              "style-src 'self' https://cdn.jsdelivr.net 'unsafe-inline'; "
-             "img-src 'self' data: https://fastapi.tiangolo.com; "
+             "img-src 'self' data: https://fastapi.tiangolo.com https://res.cloudinary.com; "
              "connect-src 'self'; "
              "frame-ancestors 'none'; "
              "base-uri 'self'; "
