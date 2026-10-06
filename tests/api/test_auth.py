@@ -528,7 +528,7 @@ def test_resend_verification_email_failure_remains_generic(
     monkeypatch,
 ):
     """
-    An email-delivery failure does not expose SMTP details or account
+    An email-delivery failure does not expose email delivery details or account
     existence through the API response.
     """
 
@@ -541,7 +541,7 @@ def test_resend_verification_email_failure_remains_generic(
     )
 
     send_mock = AsyncMock(
-        side_effect=RuntimeError("SMTP connection failed"),
+        side_effect=RuntimeError("Resend delivery failed"),
     )
 
     monkeypatch.setattr(
@@ -706,7 +706,7 @@ def test_forgot_password_email_failure_remains_generic(
     monkeypatch,
 ):
     """
-    A password-reset email delivery failure does not expose SMTP details
+    A password-reset email delivery failure does not expose email delivery details
     or account existence.
     """
 
@@ -718,7 +718,7 @@ def test_forgot_password_email_failure_remains_generic(
     )
 
     send_mock = AsyncMock(
-        side_effect=RuntimeError("SMTP connection failed"),
+        side_effect=RuntimeError("Resend delivery failed"),
     )
 
     monkeypatch.setattr(

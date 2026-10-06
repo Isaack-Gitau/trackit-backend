@@ -661,14 +661,14 @@ async def send_admin_email(
     - The administrator may include their own account.
     - Each recipient receives an individual email.
     - Recipients cannot see the email addresses of other recipients.
-    - SMTP failure for one recipient does not stop delivery to
+    - Email delivery failure for one recipient does not stop delivery to
       remaining recipients.
     - Email message content is never stored in audit logs.
-    - SMTP exception details are not exposed through the API.
+    - Email delivery exception details are not exposed through the API.
 
     Delivery failures are returned as per-recipient results rather
-    than causing successful deliveries to be rolled back. SMTP is an
-    external system and therefore cannot participate in the database
+    than causing successful deliveries to be rolled back. Resend is an
+    external email service and therefore cannot participate in the database
     transaction.
 
     Raises:

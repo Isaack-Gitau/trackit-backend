@@ -211,7 +211,7 @@ def test_delivery_failure_does_not_stop_other_recipients():
         message: str,
     ) -> None:
         if recipient == "two@example.com":
-            raise RuntimeError("SMTP failure")
+            raise RuntimeError("Resend delivery failed")
 
     mock_sender = AsyncMock(
         side_effect=send_side_effect,

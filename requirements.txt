@@ -51,5 +51,6 @@ uvloop==0.22.1
 watchfiles==1.2.0
 websockets==17.0.1
 cloudinary==1.46.3
-aiosmtplib==5.1.2
 redis==8.1.0
+resend==2.49.1
+requests==2.34.2

@@ -4689,7 +4689,7 @@ def test_admin_email_delivery_failure_does_not_stop_other_recipients(
         message: str,
     ) -> None:
         if recipient == failed_recipient.email:
-            raise RuntimeError("Simulated SMTP failure.")
+            raise RuntimeError("Simulated Resend delivery failure.")
 
     with patch(
         "app.services.admin_email.send_admin_custom_email",
@@ -4764,7 +4764,7 @@ def test_admin_email_creates_audit_log_for_each_recipient(
         message: str,
     ) -> None:
         if recipient == failed_recipient.email:
-            raise RuntimeError("Simulated SMTP failure.")
+            raise RuntimeError("Simulated Resend delivery failure.")
 
     email_message = "This private message must not appear in the audit log."
 
@@ -5829,7 +5829,7 @@ def test_admin_suspend_email_failure_does_not_rollback_suspension(
     with patch(
         "app.routers.profile.send_account_deactivation_email",
         new_callable=AsyncMock,
-        side_effect=RuntimeError("SMTP delivery failed."),
+        side_effect=RuntimeError("Resend delivery failed."),
     ) as mock_send_email:
         response = client.patch(
             f"/api/profile/admin/{target_user.id}/deactivate",
@@ -6725,7 +6725,7 @@ def test_admin_activate_email_failure_does_not_rollback_activation(
     with patch(
         "app.routers.profile.send_account_reactivation_email",
         new_callable=AsyncMock,
-        side_effect=RuntimeError("SMTP delivery failed."),
+        side_effect=RuntimeError("Resend delivery failed."),
     ) as mock_send_email:
         response = client.patch(
             f"/api/profile/admin/{target_user.id}/activate",

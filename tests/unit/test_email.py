@@ -10,7 +10,7 @@ Coverage:
 - optional suspension reason
 - HTML escaping
 - recipient validation
-- SMTP delivery delegation
+- Resend delivery delegation
 - administrator custom email
 - custom email subject/message normalization
 - custom email HTML escaping
@@ -69,8 +69,119 @@ TEST_REASON = "Repeatedly submitting misleading claims."
 
 
 # ============================================================================
+# RESEND EMAIL TRANSPORT
+# ============================================================================
+
+
+def test_send_email_sends_expected_payload_through_resend():
+    """
+    _send_email should pass the expected transactional email payload
+    to the Resend async client.
+    """
+
+    mock_send_async = AsyncMock()
+
+    with patch(
+        "app.services.email.resend.Emails.send_async",
+        mock_send_async,
+    ):
+        from app.services.email import _send_email
+
+        asyncio.run(
+            _send_email(
+                recipient=" recipient@example.com ",
+                subject="Test subject",
+                html_body="<p>Hello</p>",
+                text_body="Hello",
+            )
+        )
+
+    mock_send_async.assert_awaited_once()
+
+    call_args = mock_send_async.await_args
+
+    assert call_args is not None
+
+    payload = call_args.args[0]
+
+    assert payload["from"] == "TRACKIT <onboarding@resend.dev>"
+    assert payload["to"] == ["recipient@example.com"]
+    assert payload["subject"] == "Test subject"
+    assert payload["html"] == "<p>Hello</p>"
+    assert payload["text"] == "Hello"
+
+
+def test_send_email_rejects_empty_recipient_before_resend_call():
+    """
+    An empty recipient must be rejected before contacting Resend.
+    """
+
+    mock_send_async = AsyncMock()
+
+    with patch(
+        "app.services.email.resend.Emails.send_async",
+        mock_send_async,
+    ):
+        from app.services.email import _send_email
+
+        try:
+            asyncio.run(
+                _send_email(
+                    recipient="   ",
+                    subject="Test subject",
+                    html_body="<p>Hello</p>",
+                    text_body="Hello",
+                )
+            )
+        except ValueError as exc:
+            assert str(exc) == "Recipient email cannot be empty."
+        else:
+            raise AssertionError(
+                "Expected ValueError for an empty recipient."
+            )
+
+    mock_send_async.assert_not_awaited()
+
+
+def test_send_email_propagates_resend_delivery_failure():
+    """
+    Resend failures should propagate to the caller unchanged.
+    """
+
+    mock_send_async = AsyncMock(
+        side_effect=RuntimeError("Resend delivery failed.")
+    )
+
+    with patch(
+        "app.services.email.resend.Emails.send_async",
+        mock_send_async,
+    ):
+        from app.services.email import _send_email
+
+        try:
+            asyncio.run(
+                _send_email(
+                    recipient="user@trackit.test",
+                    subject="Test subject",
+                    html_body="<p>Hello</p>",
+                    text_body="Hello",
+                )
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "Resend delivery failed."
+        else:
+            raise AssertionError(
+                "Expected Resend delivery failure to propagate."
+            )
+
+    mock_send_async.assert_awaited_once()
+
+
+# ============================================================================
 # ACCOUNT DEACTIVATION EMAIL
 # ============================================================================
+
+
 
 
 def test_send_account_deactivation_email_successfully_sends_email():
@@ -281,12 +392,12 @@ def test_send_account_deactivation_email_rejects_empty_recipient():
 
 def test_send_account_deactivation_email_propagates_delivery_failure():
     """
-    SMTP delivery failures should propagate to the caller rather than
+    Resend delivery failures should propagate to the caller rather than
     being silently swallowed.
     """
 
     mock_send_email = AsyncMock(
-        side_effect=RuntimeError("SMTP delivery failed.")
+        side_effect=RuntimeError("Resend delivery failed.")
     )
 
     with patch(
@@ -303,10 +414,10 @@ def test_send_account_deactivation_email_propagates_delivery_failure():
                 )
             )
         except RuntimeError as exc:
-            assert str(exc) == "SMTP delivery failed."
+            assert str(exc) == "Resend delivery failed."
         else:
             raise AssertionError(
-                "Expected SMTP delivery failure."
+                "Expected Resend delivery failure."
             )
 
     mock_send_email.assert_awaited_once()
@@ -571,13 +682,13 @@ def test_send_account_reactivation_email_rejects_empty_recipient():
 
 def test_send_account_reactivation_email_propagates_delivery_failure():
     """
-    SMTP delivery failures should propagate to the caller rather than
+    Resend delivery failures should propagate to the caller rather than
     being silently swallowed.
     """
 
     mock_send_email = AsyncMock(
         side_effect=RuntimeError(
-            "SMTP delivery failed."
+            "Resend delivery failed."
         )
     )
 
@@ -594,10 +705,10 @@ def test_send_account_reactivation_email_propagates_delivery_failure():
                 )
             )
         except RuntimeError as exc:
-            assert str(exc) == "SMTP delivery failed."
+            assert str(exc) == "Resend delivery failed."
         else:
             raise AssertionError(
-                "Expected SMTP delivery failure."
+                "Expected Resend delivery failure."
             )
 
     mock_send_email.assert_awaited_once()
@@ -954,13 +1065,13 @@ def test_send_admin_custom_email_rejects_subject_carriage_return_injection():
 
 def test_send_admin_custom_email_propagates_delivery_failure():
     """
-    SMTP delivery failures should propagate to the caller rather than
+    Resend delivery failures should propagate to the caller rather than
     being silently swallowed.
     """
 
     mock_send_email = AsyncMock(
         side_effect=RuntimeError(
-            "SMTP delivery failed."
+            "Resend delivery failed."
         )
     )
 
@@ -977,10 +1088,10 @@ def test_send_admin_custom_email_propagates_delivery_failure():
                 )
             )
         except RuntimeError as exc:
-            assert str(exc) == "SMTP delivery failed."
+            assert str(exc) == "Resend delivery failed."
         else:
             raise AssertionError(
-                "Expected SMTP delivery failure."
+                "Expected Resend delivery failure."
             )
 
     mock_send_email.assert_awaited_once()

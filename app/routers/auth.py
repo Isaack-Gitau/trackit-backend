@@ -258,7 +258,7 @@ async def register(
             user.id,
         )
 
-        # The account and token already exist. Do not expose SMTP
+        # The account and token already exist. Do not expose email delivery
         # implementation details to the client.
         #
         # The user can use the resend-verification endpoint.
@@ -546,7 +546,7 @@ async def resend_verification(
         # Keep the response generic.
         #
         # This prevents account enumeration and avoids exposing
-        # SMTP implementation details.
+        # email delivery implementation details.
         return {
             "message": generic_message,
         }
@@ -650,7 +650,7 @@ async def forgot_password(
         # Keep the response generic.
         #
         # Do not expose whether the account exists or why
-        # the SMTP operation failed.
+        # the email delivery operation failed.
         return {
             "message": generic_message,
         }

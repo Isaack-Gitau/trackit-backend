@@ -40,7 +40,7 @@ async def send_admin_email_to_users(
     Each recipient receives an individual email. Recipients therefore
     cannot see the email addresses of other selected users.
 
-    SMTP failures are isolated per recipient. A failure for one user
+    Email delivery failures are isolated per recipient. A failure for one user
     does not prevent delivery attempts to the remaining users.
 
     Args:

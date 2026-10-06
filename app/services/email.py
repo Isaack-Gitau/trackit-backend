@@ -8,14 +8,14 @@ Handles transactional emails for:
 - Account reactivation
 - Administrator custom messages
 
-Uses SMTP through aiosmtplib.
+Uses the Resend HTTPS API.
 
 Security principles:
 
 - Raw authentication tokens are never stored in PostgreSQL.
 - Tokens are included only in transactional email links.
-- SMTP credentials come exclusively from application settings.
-- Credentials and tokens are never logged by this service.
+- The Resend API key comes exclusively from application settings.
+- The Resend API key and tokens are never logged by this service.
 - Both HTML and plain-text email versions are provided.
 - Administrator message content is HTML-escaped before being
   inserted into HTML email bodies.
@@ -24,17 +24,16 @@ Security principles:
 from __future__ import annotations
 
 from datetime import datetime
-from email.message import EmailMessage
 from html import escape
 from urllib.parse import quote
 
-from aiosmtplib import SMTP
+import resend
 
 from app.core.config import settings
 
 
 # ============================================================================
-# SMTP
+# RESEND EMAIL TRANSPORT
 # ============================================================================
 
 
@@ -46,14 +45,14 @@ async def _send_email(
     text_body: str,
 ) -> None:
     """
-    Send a transactional email through the configured SMTP server.
+    Send a transactional email through the Resend HTTPS API.
 
     Raises:
         ValueError:
             When the recipient is empty.
 
         Exception:
-            When SMTP connection, authentication, or delivery fails.
+            When Resend rejects or cannot deliver the email request.
     """
 
     if not recipient or not recipient.strip():
@@ -61,44 +60,20 @@ async def _send_email(
             "Recipient email cannot be empty."
         )
 
-    message = EmailMessage()
+    resend.api_key = settings.RESEND_API_KEY
 
-    message["From"] = (
-        f"{settings.SMTP_FROM_NAME} "
-        f"<{settings.SMTP_FROM_EMAIL}>"
+    await resend.Emails.send_async(
+        {
+            "from": (
+                f"{settings.RESEND_FROM_NAME} "
+                f"<{settings.RESEND_FROM_EMAIL}>"
+            ),
+            "to": [recipient.strip()],
+            "subject": subject,
+            "text": text_body,
+            "html": html_body,
+        }
     )
-
-    message["To"] = recipient.strip()
-    message["Subject"] = subject
-
-    # Plain-text fallback
-    message.set_content(text_body)
-
-    # HTML version
-    message.add_alternative(
-        html_body,
-        subtype="html",
-    )
-
-    smtp = SMTP(
-        hostname=settings.SMTP_HOST,
-        port=settings.SMTP_PORT,
-        start_tls=settings.SMTP_USE_TLS,
-    )
-
-    try:
-        await smtp.connect()
-
-        await smtp.login(
-            settings.SMTP_USERNAME,
-            settings.SMTP_PASSWORD,
-        )
-
-        await smtp.send_message(message)
-
-    finally:
-        if smtp.is_connected:
-            await smtp.quit()
 
 
 # ============================================================================
@@ -885,7 +860,7 @@ async def send_admin_custom_email(
             When the recipient, subject, or message is invalid.
 
         Exception:
-            When SMTP connection, authentication, or delivery fails.
+            When the Resend request or email delivery fails.
     """
 
     if not recipient or not recipient.strip():

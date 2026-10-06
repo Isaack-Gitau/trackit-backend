@@ -295,25 +295,18 @@ class Settings(BaseSettings):
     )
 
     # ========================================================================
-    # Email / SMTP
+    # Email / Resend
     # ========================================================================
 
-    SMTP_HOST: str = "smtp.gmail.com"
+    # Supplied through RESEND_API_KEY environment variable or .env.
+    # Never use a real API key as a source-code default.
+    RESEND_API_KEY: str = ""
 
-    SMTP_PORT: int = 587
+    # Resend's testing sender is used for the current portfolio deployment.
+    # A verified custom domain can replace this later.
+    RESEND_FROM_EMAIL: str = "onboarding@resend.dev"
 
-    # Supplied through SMTP_USERNAME environment variable or .env.
-    SMTP_USERNAME: str = ""
-
-    # Supplied through SMTP_PASSWORD environment variable or .env.
-    SMTP_PASSWORD: str = ""
-
-    # Supplied through SMTP_FROM_EMAIL environment variable or .env.
-    SMTP_FROM_EMAIL: str = ""
-
-    SMTP_FROM_NAME: str = "TRACKIT"
-
-    SMTP_USE_TLS: bool = True
+    RESEND_FROM_NAME: str = "TRACKIT"
 
     # ------------------------------------------------------------------------
     # Frontend
