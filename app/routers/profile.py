@@ -75,8 +75,10 @@ from fastapi import (
     Body,
     Depends,
     File,
+    Header,
     HTTPException,
     Query,
+    Request,
     UploadFile,
     status,
 )
@@ -88,9 +90,12 @@ from app.api.deps import (
     get_current_admin,
     get_current_moderator,
     get_current_user,
+    get_current_verified_user,
 )
 from app.db.dependencies import get_db
 from app.core.constants import UserRole
+from app.core.config import settings
+from app.core.rate_limit import check_rate_limit
 from app.models.user import User
 from app.schemas.profile import (
     AdminAuditLogListResponse,
@@ -126,6 +131,7 @@ from app.services.audit_log import (
 )
 from app.services.user import (
     activate_suspended_user,
+    bootstrap_first_admin_service,
     delete_user_account_by_admin_service,
     delete_user_account_service,
     delete_user_profile_picture_service,
@@ -625,6 +631,132 @@ def delete_account(
             )
 
     return None
+
+# ============================================================================
+# FIRST ADMINISTRATOR BOOTSTRAP
+# ============================================================================
+
+
+@router.post(
+    "/admin-bootstrap",
+    response_model=AdminUserDetailResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Bootstrap the first administrator account",
+)
+def bootstrap_first_admin(
+    request: Request,
+    x_admin_bootstrap_secret: str | None = Header(
+        default=None,
+        alias="X-Admin-Bootstrap-Secret",
+    ),
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_verified_user),
+) -> AdminUserDetailResponse:
+    """
+    Promote the configured bootstrap account to administrator.
+
+    This endpoint exists only for initial TRACKIT administrator
+    initialization.
+
+    Security requirements:
+
+    - The caller must have a valid active JWT.
+    - The caller must have a verified account.
+    - The bootstrap secret must be supplied through the request header.
+    - The configured bootstrap username must match the authenticated user.
+    - No active administrator may already exist.
+    - Bootstrap attempts are rate limited by client IP.
+    - The bootstrap secret is never written to audit logs.
+    - Existing authentication sessions are invalidated after promotion.
+
+    The endpoint does not accept a target user ID. The authenticated
+    user is always the target account, preventing arbitrary account
+    elevation.
+    """
+
+    # ------------------------------------------------------------------
+    # Rate limit
+    # ------------------------------------------------------------------
+
+    client_ip = (
+        request.client.host.strip()
+        if request.client and request.client.host
+        else "unknown"
+    )
+
+    rate_limit_result = check_rate_limit(
+        key=f"admin-bootstrap:{client_ip}",
+        max_attempts=settings.ADMIN_BOOTSTRAP_RATE_LIMIT_ATTEMPTS,
+        window_seconds=(
+            settings.ADMIN_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS
+        ),
+    )
+
+    if not rate_limit_result.allowed:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail=(
+                "Too many administrator bootstrap attempts. "
+                "Please try again later."
+            ),
+            headers={
+                "Retry-After": str(
+                    rate_limit_result.retry_after
+                ),
+            },
+        )
+
+    # ------------------------------------------------------------------
+    # Bootstrap
+    # ------------------------------------------------------------------
+
+    try:
+        promoted_user = bootstrap_first_admin_service(
+            db,
+            target_user=current_user,
+            bootstrap_username=settings.ADMIN_BOOTSTRAP_USERNAME,
+            provided_secret=x_admin_bootstrap_secret or "",
+            configured_secret=settings.ADMIN_BOOTSTRAP_SECRET,
+        )
+
+    except ValueError as exc:
+        detail = str(exc)
+
+        if detail == "Administrator bootstrap is no longer available.":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=detail,
+            ) from exc
+
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=detail,
+        ) from exc
+
+    # ------------------------------------------------------------------
+    # Audit
+    # ------------------------------------------------------------------
+
+    create_audit_log(
+        db,
+        event_type=AUDIT_ADMIN_ACTION,
+        success=True,
+        description=(
+            "Initial administrator account was bootstrapped."
+        ),
+        user_id=None,
+        subject_user_id=promoted_user.id,
+        resource_type="user",
+        resource_id=promoted_user.id,
+    )
+
+    # ------------------------------------------------------------------
+    # Response
+    # ------------------------------------------------------------------
+
+    return AdminUserDetailResponse.model_validate(
+        promoted_user
+    )
 
 
 # ============================================================================

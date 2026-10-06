@@ -575,6 +575,32 @@ def promote_moderator_to_admin(
 
 # -----------------------------------------------------------------------------
 
+def promote_user_to_admin_bootstrap(
+    db: Session,
+    user: User,
+) -> User:
+    """
+    Promote the configured bootstrap user directly to administrator.
+
+    This operation exists only for first-administrator bootstrap.
+    Security checks belong to the service layer.
+
+    The operation is intentionally not committed here.
+    The caller controls transaction commit/rollback.
+    """
+
+    user.role = UserRole.ADMIN
+    user.updated_at = datetime.now(
+        timezone.utc
+    )
+
+    db.add(user)
+    db.flush()
+    db.refresh(user)
+
+    return user
+
+
 
 def demote_admin_to_moderator(
     db: Session,

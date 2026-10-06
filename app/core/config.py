@@ -89,6 +89,13 @@ class Settings(BaseSettings):
     REGISTER_RATE_LIMIT_WINDOW_SECONDS: int = 900
 
     # ========================================================================
+    # Administrator Bootstrap Rate Limiting
+    # ========================================================================
+
+    ADMIN_BOOTSTRAP_RATE_LIMIT_ATTEMPTS: int = 3
+    ADMIN_BOOTSTRAP_RATE_LIMIT_WINDOW_SECONDS: int = 900
+
+    # ========================================================================
     # Media / Image Uploads
     # ========================================================================
 
@@ -293,6 +300,26 @@ class Settings(BaseSettings):
         "microphone=(), "
         "geolocation=()"
     )
+
+    # ========================================================================
+    # Initial Administrator Bootstrap
+    # ========================================================================
+
+    """
+    One-time bootstrap configuration used to create the first
+    administrator account.
+
+    The bootstrap secret must be supplied through the deployment
+    environment and must never be committed to source control.
+
+    The bootstrap username is intentionally fixed server-side so
+    the bootstrap endpoint cannot be used to elevate an arbitrary
+    account.
+    """
+
+    ADMIN_BOOTSTRAP_SECRET: str = ""
+
+    ADMIN_BOOTSTRAP_USERNAME: str = ""
 
     # ========================================================================
     # Email / Resend

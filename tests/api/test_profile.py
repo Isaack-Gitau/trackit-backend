@@ -60,6 +60,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.core.config import settings
+from app.core.rate_limit import clear_rate_limit_store
 from tests.conftest import TEST_DATABASE_URL
 from app.core.constants import UserRole
 from app.core.security import create_access_token, hash_password
@@ -74,6 +75,7 @@ from app.models.report import Report
 from app.models.user import User
 from app.services.user import (
     activate_suspended_user,
+    bootstrap_first_admin_service,
     demote_admin_to_moderator_service,
     promote_moderator_to_admin_service,
     promote_user_to_moderator_service,
@@ -2539,8 +2541,616 @@ def test_admin_can_view_inactive_user(
 
 
 # ============================================================================
+# FIRST ADMINISTRATOR BOOTSTRAP
+# ============================================================================
+
+
+@pytest.fixture
+def reset_admin_bootstrap_rate_limit():
+    """
+    Keep administrator-bootstrap rate-limit state isolated per test.
+    """
+
+    clear_rate_limit_store()
+
+    yield
+
+    clear_rate_limit_store()
+
+
+def configure_admin_bootstrap(
+    monkeypatch,
+    *,
+    username: str,
+    secret: str = "test-bootstrap-secret",
+):
+    """
+    Configure the bootstrap settings for an API test.
+    """
+
+    monkeypatch.setattr(
+        settings,
+        "ADMIN_BOOTSTRAP_USERNAME",
+        username,
+    )
+    monkeypatch.setattr(
+        settings,
+        "ADMIN_BOOTSTRAP_SECRET",
+        secret,
+    )
+
+
+def test_admin_bootstrap_requires_authentication(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Administrator bootstrap requires an authenticated account.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="bootstrapadmin",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 401
+
+
+def test_admin_bootstrap_requires_verified_account(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    An unverified account cannot become the first administrator.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="unverifiedbootstrap",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3301,
+        username="unverifiedbootstrap",
+        email="unverifiedbootstrap@example.com",
+        is_verified=False,
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"]
+        == "Email verification required."
+    )
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_rejects_missing_secret(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    The bootstrap secret is mandatory.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="missingsecretbootstrap",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3302,
+        username="missingsecretbootstrap",
+        email="missingsecretbootstrap@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers=authenticated_headers(user),
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_rejects_invalid_secret(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    An incorrect bootstrap secret cannot elevate the account.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="wrongsecretbootstrap",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3303,
+        username="wrongsecretbootstrap",
+        email="wrongsecretbootstrap@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "wrong-secret",
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_rejects_wrong_username(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Only the configured bootstrap username can be elevated.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="configuredbootstrap",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3304,
+        username="differentuser",
+        email="differentuser@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"]
+        == "This account is not authorized for administrator bootstrap."
+    )
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_requires_configured_secret(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Bootstrap is unavailable when no secret is configured.
+    """
+
+    monkeypatch.setattr(
+        settings,
+        "ADMIN_BOOTSTRAP_USERNAME",
+        "unconfiguredbootstrap",
+    )
+    monkeypatch.setattr(
+        settings,
+        "ADMIN_BOOTSTRAP_SECRET",
+        "",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3305,
+        username="unconfiguredbootstrap",
+        email="unconfiguredbootstrap@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_rejects_when_active_admin_exists(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Bootstrap is unavailable once an active administrator exists.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="secondbootstrap",
+    )
+
+    existing_admin = create_admin(
+        db,
+        user_id=3306,
+        username="existingbootstrapadmin",
+        email="existingbootstrapadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3307,
+        username="secondbootstrap",
+        email="secondbootstrap@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(target_user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 409
+    assert (
+        response.json()["detail"]
+        == "Administrator bootstrap is no longer available."
+    )
+
+    db.refresh(existing_admin)
+    db.refresh(target_user)
+
+    assert existing_admin.role == UserRole.ADMIN
+    assert target_user.role == UserRole.USER
+
+
+def test_admin_bootstrap_successfully_promotes_first_admin(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    The configured verified account can become the first administrator.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="firstbootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3308,
+        username="firstbootstrapadmin",
+        email="firstbootstrapadmin@example.com",
+    )
+
+    old_token_version = user.token_version
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 200
+
+    data = response.json()
+
+    assert data["id"] == user.id
+    assert data["username"] == user.username
+    assert data["role"] == UserRole.ADMIN
+    assert data["is_active"] is True
+    assert data["is_verified"] is True
+
+    db.refresh(user)
+
+    assert user.role == UserRole.ADMIN
+    assert user.token_version == old_token_version + 1
+
+
+def test_admin_bootstrap_invalidates_previous_authentication(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    The JWT used for bootstrap is invalid after role promotion.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="tokenbootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3309,
+        username="tokenbootstrapadmin",
+        email="tokenbootstrapadmin@example.com",
+    )
+
+    headers = authenticated_headers(user)
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **headers,
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 200
+
+    response = client.get(
+        "/api/profile",
+        headers=headers,
+    )
+
+    assert response.status_code == 401
+
+    db.refresh(user)
+
+    assert user.role == UserRole.ADMIN
+
+
+def test_admin_bootstrap_creates_subject_audit_record(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Successful bootstrap creates an audit record for the affected user.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="auditbootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3310,
+        username="auditbootstrapadmin",
+        email="auditbootstrapadmin@example.com",
+    )
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert response.status_code == 200
+
+    audit_logs = (
+        db.query(AuditLog)
+        .filter(
+            AuditLog.event_type == "admin_action",
+            AuditLog.subject_user_id == user.id,
+        )
+        .all()
+    )
+
+    assert len(audit_logs) == 1
+
+    audit_log = audit_logs[0]
+
+    assert audit_log.user_id is None
+    assert audit_log.subject_user_id == user.id
+    assert audit_log.resource_type == "user"
+    assert audit_log.resource_id == user.id
+    assert audit_log.success is True
+    assert (
+        audit_log.description
+        == "Initial administrator account was bootstrapped."
+    )
+
+
+def test_admin_bootstrap_cannot_be_reused(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Once the first administrator exists, bootstrap cannot be reused.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="reusablebootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3311,
+        username="reusablebootstrapadmin",
+        email="reusablebootstrapadmin@example.com",
+    )
+
+    first_response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert first_response.status_code == 200
+
+    db.refresh(user)
+
+    second_response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "test-bootstrap-secret",
+        },
+    )
+
+    assert second_response.status_code == 403
+    assert (
+        second_response.json()["detail"]
+        == (
+            "Only a regular user account can be used "
+            "for administrator bootstrap."
+        )
+    )
+
+
+def test_admin_bootstrap_is_rate_limited(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    Administrator bootstrap attempts are rate limited by client IP.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="ratebootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3312,
+        username="ratebootstrapadmin",
+        email="ratebootstrapadmin@example.com",
+    )
+
+    headers = {
+        **authenticated_headers(user),
+        "X-Admin-Bootstrap-Secret": "wrong-secret",
+    }
+
+    for _ in range(3):
+        response = client.post(
+            "/api/profile/admin-bootstrap",
+            headers=headers,
+        )
+        assert response.status_code == 403
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers=headers,
+    )
+
+    assert response.status_code == 429
+    assert (
+        response.json()["detail"]
+        == "Too many administrator bootstrap attempts. "
+        "Please try again later."
+    )
+    assert "Retry-After" in response.headers
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+
+
+def test_admin_bootstrap_failure_does_not_change_role(
+    client: TestClient,
+    db: Session,
+    monkeypatch,
+    reset_admin_bootstrap_rate_limit,
+):
+    """
+    A failed bootstrap attempt leaves the account unchanged.
+    """
+
+    configure_admin_bootstrap(
+        monkeypatch,
+        username="rollbackbootstrapadmin",
+    )
+
+    user = create_test_user(
+        db,
+        user_id=3313,
+        username="rollbackbootstrapadmin",
+        email="rollbackbootstrapadmin@example.com",
+    )
+
+    old_token_version = user.token_version
+
+    response = client.post(
+        "/api/profile/admin-bootstrap",
+        headers={
+            **authenticated_headers(user),
+            "X-Admin-Bootstrap-Secret": "invalid-secret",
+        },
+    )
+
+    assert response.status_code == 403
+
+    db.refresh(user)
+
+    assert user.role == UserRole.USER
+    assert user.token_version == old_token_version
+
+
+# ============================================================================
 # USER -> MODERATOR PROMOTION
 # ============================================================================
+
+
 
 
 def test_promote_user_to_moderator_requires_authentication(
@@ -3706,6 +4316,306 @@ def test_revoke_moderator_service_rejects_admin_target(
     assert target_admin.role == UserRole.ADMIN
 
 
+
+def test_bootstrap_first_admin_service_rejects_missing_secret(
+    db: Session,
+):
+    """
+    Administrator bootstrap requires a configured secret.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3601,
+        username="bootstrapmissingsecret",
+        email="bootstrapmissingsecret@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="bootstrap is not configured",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username=target_user.username,
+            provided_secret="test-secret",
+            configured_secret="",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_bootstrap_first_admin_service_rejects_missing_username(
+    db: Session,
+):
+    """
+    Administrator bootstrap requires a configured bootstrap username.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3602,
+        username="bootstrapmissingusername",
+        email="bootstrapmissingusername@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="bootstrap username is not configured",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username="",
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_bootstrap_first_admin_service_rejects_invalid_secret(
+    db: Session,
+):
+    """
+    Administrator bootstrap rejects an incorrect bootstrap secret.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3603,
+        username="bootstrapinvalidsecret",
+        email="bootstrapinvalidsecret@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Invalid administrator bootstrap credentials",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username=target_user.username,
+            provided_secret="wrong-secret",
+            configured_secret="correct-secret",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_bootstrap_first_admin_service_rejects_wrong_username(
+    db: Session,
+):
+    """
+    Administrator bootstrap cannot elevate an account other than the
+    configured bootstrap username.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3604,
+        username="notbootstrapaccount",
+        email="notbootstrapaccount@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="not authorized for administrator bootstrap",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username="trackit-frontend",
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+
+
+def test_bootstrap_first_admin_service_rejects_inactive_account(
+    db: Session,
+):
+    """
+    An inactive account cannot be used for administrator bootstrap.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3605,
+        username="bootstrapinactive",
+        email="bootstrapinactive@example.com",
+    )
+
+    target_user.is_active = False
+    db.flush()
+
+    with pytest.raises(
+        ValueError,
+        match="bootstrap account must be active",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username=target_user.username,
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+    assert target_user.is_active is False
+
+
+def test_bootstrap_first_admin_service_rejects_unverified_account(
+    db: Session,
+):
+    """
+    An unverified account cannot be used for administrator bootstrap.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3606,
+        username="bootstrapunverified",
+        email="bootstrapunverified@example.com",
+        is_verified=False,
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Email verification is required",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username=target_user.username,
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.USER
+    assert target_user.is_verified is False
+
+
+def test_bootstrap_first_admin_service_rejects_non_user_target(
+    db: Session,
+):
+    """
+    Administrator bootstrap only accepts a regular user account.
+    """
+
+    admin = create_admin(
+        db,
+        user_id=3607,
+        username="bootstrapadmintarget",
+        email="bootstrapadmintarget@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Only a regular user account",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=admin,
+            bootstrap_username=admin.username,
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(admin)
+
+    assert admin.role == UserRole.ADMIN
+
+
+def test_bootstrap_first_admin_service_rejects_existing_active_admin(
+    db: Session,
+):
+    """
+    Bootstrap cannot create a second active administrator.
+    """
+
+    existing_admin = create_admin(
+        db,
+        user_id=3608,
+        username="existingbootstrapadmin",
+        email="existingbootstrapadmin@example.com",
+    )
+
+    target_user = create_test_user(
+        db,
+        user_id=3609,
+        username="bootstrapsecondadmin",
+        email="bootstrapsecondadmin@example.com",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="Administrator bootstrap is no longer available",
+    ):
+        bootstrap_first_admin_service(
+            db,
+            target_user=target_user,
+            bootstrap_username=target_user.username,
+            provided_secret="test-secret",
+            configured_secret="test-secret",
+        )
+
+    db.refresh(existing_admin)
+    db.refresh(target_user)
+
+    assert existing_admin.role == UserRole.ADMIN
+    assert target_user.role == UserRole.USER
+
+
+def test_bootstrap_first_admin_service_successfully_promotes_first_admin(
+    db: Session,
+):
+    """
+    Successful bootstrap promotes the configured verified user and
+    invalidates existing authentication by incrementing token_version.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3610,
+        username="bootstrapfirstadmin",
+        email="bootstrapfirstadmin@example.com",
+    )
+
+    original_token_version = target_user.token_version
+
+    promoted_user = bootstrap_first_admin_service(
+        db,
+        target_user=target_user,
+        bootstrap_username=target_user.username,
+        provided_secret="test-secret",
+        configured_secret="test-secret",
+    )
+
+    assert promoted_user.id == target_user.id
+    assert promoted_user.role == UserRole.ADMIN
+    assert promoted_user.token_version == original_token_version + 1
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.ADMIN
+    assert target_user.token_version == original_token_version + 1
+
+
 # ============================================================================
 # ROLE PERSISTENCE / HIERARCHY
 # ============================================================================
@@ -3986,6 +4896,56 @@ def test_revoked_moderator_token_cannot_gain_privileges_from_old_role(
 # ============================================================================
 # ROLE MANAGEMENT TRANSACTION BEHAVIOR
 # ============================================================================
+
+
+
+def test_bootstrap_first_admin_service_can_be_rolled_back(
+    db: Session,
+):
+    """
+    Administrator bootstrap is flush-only and can be rolled back.
+    """
+
+    target_user = create_test_user(
+        db,
+        user_id=3611,
+        username="bootstraprollback",
+        email="bootstraprollback@example.com",
+    )
+
+    target_user_id = target_user.id
+    original_token_version = target_user.token_version
+
+    nested = db.begin_nested()
+
+    promoted = bootstrap_first_admin_service(
+        db,
+        target_user=target_user,
+        bootstrap_username=target_user.username,
+        provided_secret="test-secret",
+        configured_secret="test-secret",
+    )
+
+    assert promoted.role == UserRole.ADMIN
+    assert promoted.token_version == original_token_version + 1
+
+    db.refresh(target_user)
+
+    assert target_user.role == UserRole.ADMIN
+    assert target_user.token_version == original_token_version + 1
+
+    nested.rollback()
+
+    db.expire_all()
+
+    restored_user = db.get(
+        User,
+        target_user_id,
+    )
+
+    assert restored_user is not None
+    assert restored_user.role == UserRole.USER
+    assert restored_user.token_version == original_token_version
 
 
 def test_promote_user_to_moderator_service_can_be_rolled_back(

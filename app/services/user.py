@@ -30,6 +30,7 @@ Transaction policy:
 
 from collections.abc import Mapping
 from datetime import datetime, timedelta, timezone
+from secrets import compare_digest
 
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -54,6 +55,7 @@ from app.repositories.users import (
     get_user_media_storage_keys,
     get_users,
     promote_moderator_to_admin,
+    promote_user_to_admin_bootstrap,
     promote_user_to_moderator,
     revoke_moderator,
     update_user_profile,
@@ -1388,6 +1390,135 @@ def promote_user_to_moderator_service(
 
 
 # -----------------------------------------------------------------------------
+# FIRST ADMINISTRATOR BOOTSTRAP
+# -----------------------------------------------------------------------------
+
+
+def bootstrap_first_admin_service(
+    db: Session,
+    *,
+    target_user: User,
+    bootstrap_username: str,
+    provided_secret: str,
+    configured_secret: str,
+) -> User:
+    """
+    Promote the configured first administrator account directly
+    from regular user to administrator.
+
+    This is a one-time initialization path and is intentionally
+    separate from the normal:
+
+        user → moderator → administrator
+
+    role lifecycle.
+
+    Security requirements:
+
+    - The bootstrap secret must be configured.
+    - The provided secret must match the configured secret.
+    - The target username must match the configured bootstrap username.
+    - The target account must be active.
+    - The target account must be verified.
+    - The target account must currently be a regular user.
+    - No active administrator may already exist.
+    - Administrator-count checks are serialized using the existing
+      PostgreSQL transaction-level advisory lock.
+    - Existing authentication sessions are invalidated after
+      the role change.
+    - The operation is flushed but not committed.
+    - The caller controls transaction commit/rollback.
+
+    Raises:
+        ValueError:
+            If any bootstrap requirement is not satisfied.
+    """
+
+    normalized_bootstrap_username = (
+        bootstrap_username or ""
+    ).strip().lower()
+
+    normalized_target_username = (
+        target_user.username or ""
+    ).strip().lower()
+
+    if not configured_secret:
+        raise ValueError(
+            "Administrator bootstrap is not configured."
+        )
+
+    if not normalized_bootstrap_username:
+        raise ValueError(
+            "Administrator bootstrap username is not configured."
+        )
+
+    if not provided_secret or not compare_digest(
+        provided_secret,
+        configured_secret,
+    ):
+        raise ValueError(
+            "Invalid administrator bootstrap credentials."
+        )
+
+    if (
+        normalized_target_username
+        != normalized_bootstrap_username
+    ):
+        raise ValueError(
+            "This account is not authorized for administrator bootstrap."
+        )
+
+    if not target_user.is_active:
+        raise ValueError(
+            "The bootstrap account must be active."
+        )
+
+    if not target_user.is_verified:
+        raise ValueError(
+            "Email verification is required before administrator bootstrap."
+        )
+
+    target_role = (
+        (target_user.role or "")
+        .strip()
+        .lower()
+    )
+
+    if target_role != UserRole.USER:
+        raise ValueError(
+            "Only a regular user account can be used for administrator bootstrap."
+        )
+
+    # Serialize the first-administrator check against other operations
+    # that can change the administrator count.
+    _acquire_admin_invariant_lock(db)
+
+    active_admin_count = count_active_users_by_role(
+        db,
+        UserRole.ADMIN,
+    )
+
+    if active_admin_count > 0:
+        raise ValueError(
+            "Administrator bootstrap is no longer available."
+        )
+
+    promoted_user = promote_user_to_admin_bootstrap(
+        db,
+        target_user,
+    )
+
+    _invalidate_role_change_authentication(
+        db,
+        promoted_user,
+    )
+
+    return promoted_user
+
+
+# -----------------------------------------------------------------------------
+# NORMAL MODERATOR → ADMINISTRATOR PROMOTION
+# ----------------------------------------------------------------------------
 
 
 def promote_moderator_to_admin_service(
