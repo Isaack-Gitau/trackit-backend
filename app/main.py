@@ -32,10 +32,20 @@ Router architecture:
        └── /
 """
 
+import logging
+
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
+logger.warning(
+    "Temporary admin bootstrap config diagnostic: "
+    "username_configured=%s secret_configured=%s",
+    bool(settings.ADMIN_BOOTSTRAP_USERNAME.strip()),
+    bool(settings.ADMIN_BOOTSTRAP_SECRET),
+)
 from app.middleware.security import configure_security_middleware
 from app.routers.api import router as api_router
 from app.routers.auth import router as auth_router
